@@ -24,8 +24,10 @@ const STATUS_INVALIDATE: usize = 400;
 
 /// `LABELWERK_DEBUG=1` traces the USB conversation on stderr.
 fn trace(msg: impl FnOnce() -> String) {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     if std::env::var_os("LABELWERK_DEBUG").is_some() {
-        eprintln!("[usb] {}", msg());
+        let t = START.get_or_init(Instant::now).elapsed();
+        eprintln!("[usb {:6.3}s] {}", t.as_secs_f32(), msg());
     }
 }
 
@@ -40,8 +42,9 @@ pub struct UsbDevice {
 
 /// Brother label printers (QL, PT) on USB.
 pub fn list_usb() -> Result<Vec<UsbDevice>> {
+    trace(|| "list devices".into());
     let devices = nusb::list_devices().wait().context("listing USB devices")?;
-    Ok(devices
+    let found: Vec<UsbDevice> = devices
         .filter(|d| d.vendor_id() == BROTHER_VID)
         .filter(|d| {
             d.product_string().is_some_and(|p| p.contains("QL-") || p.contains("PT-"))
@@ -53,7 +56,12 @@ pub fn list_usb() -> Result<Vec<UsbDevice>> {
             product_id: d.product_id(),
             info: d,
         })
-        .collect())
+        .collect();
+    // macOS can list one device twice for a moment (after another process let go of it)
+    let mut found = found;
+    found.dedup_by(|a, b| a.product_id == b.product_id && a.serial.is_some() && a.serial == b.serial);
+    trace(|| format!("found {} Brother printer(s)", found.len()));
+    Ok(found)
 }
 
 pub struct UsbPrinter {
