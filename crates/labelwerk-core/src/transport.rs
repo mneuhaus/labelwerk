@@ -59,7 +59,8 @@ pub fn list_usb() -> Result<Vec<UsbDevice>> {
         .collect();
     // macOS can list one device twice for a moment (after another process let go of it)
     let mut found = found;
-    found.dedup_by(|a, b| a.product_id == b.product_id && a.serial.is_some() && a.serial == b.serial);
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|d| d.serial.is_none() || seen.insert((d.product_id, d.serial.clone())));
     trace(|| format!("found {} Brother printer(s)", found.len()));
     Ok(found)
 }
