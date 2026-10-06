@@ -13,11 +13,21 @@ use serde::Serialize;
 
 use crate::bitmap::Bitmap;
 use crate::media::Media;
-use crate::protocol::{INITIALIZE, INVALIDATE_BYTES, PrintOptions, STATUS_REQUEST, encode_job};
+use crate::model::Model;
+use crate::protocol::{INITIALIZE, PrintOptions, STATUS_REQUEST, encode_job};
 use crate::status::{STATUS_LEN, Status, StatusType};
 
 pub const BROTHER_VID: u16 = 0x04F9;
 const PRINTER_CLASS: u8 = 0x07;
+/// Zero bytes before a status request: enough to flush half a raster line of any model.
+const STATUS_INVALIDATE: usize = 400;
+
+/// `LABELWERK_DEBUG=1` traces the USB conversation on stderr.
+fn trace(msg: impl FnOnce() -> String) {
+    if std::env::var_os("LABELWERK_DEBUG").is_some() {
+        eprintln!("[usb] {}", msg());
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsbDevice {
@@ -28,13 +38,13 @@ pub struct UsbDevice {
     info: nusb::DeviceInfo,
 }
 
-/// Brother label printers on USB.
+/// Brother label printers (QL, PT) on USB.
 pub fn list_usb() -> Result<Vec<UsbDevice>> {
     let devices = nusb::list_devices().wait().context("listing USB devices")?;
     Ok(devices
         .filter(|d| d.vendor_id() == BROTHER_VID)
         .filter(|d| {
-            d.product_string().is_some_and(|p| p.contains("QL-"))
+            d.product_string().is_some_and(|p| p.contains("QL-") || p.contains("PT-"))
                 || d.interfaces().any(|i| i.class() == PRINTER_CLASS)
         })
         .map(|d| UsbDevice {
@@ -54,6 +64,7 @@ pub struct UsbPrinter {
 
 impl UsbPrinter {
     pub fn open(device: &UsbDevice) -> Result<Self> {
+        trace(|| format!("open {} ({:04x})", device.product, device.product_id));
         let dev = device.info.open().wait().with_context(|| format!("opening {}", device.product))?;
         let config = dev.active_configuration().context("reading USB configuration")?;
         let (number, ep_in, ep_out) = config
@@ -72,14 +83,17 @@ impl UsbPrinter {
             .detach_and_claim_interface(number)
             .wait()
             .with_context(|| format!("claiming {} (is another program printing to it?)", device.product))?;
+        trace(|| format!("claimed interface {number}, in {ep_in:#04x}, out {ep_out:#04x}"));
         let reader = intf.endpoint::<Bulk, In>(ep_in)?.reader(64);
         let writer = intf.endpoint::<Bulk, Out>(ep_out)?.writer(16 * 1024).with_write_timeout(Duration::from_secs(30));
         Ok(Self { device: device.clone(), reader, writer })
     }
 
     pub fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        trace(|| format!("write {} bytes", data.len()));
         self.writer.write_all(data).context("sending to printer")?;
         self.writer.flush().context("sending to printer")?;
+        trace(|| "write done".into());
         Ok(())
     }
 
@@ -88,7 +102,10 @@ impl UsbPrinter {
         self.reader.set_read_timeout(timeout);
         let mut buf = [0u8; STATUS_LEN];
         match self.reader.read_exact(&mut buf) {
-            Ok(()) => Status::parse(&buf).map(Some),
+            Ok(()) => {
+                trace(|| format!("status {:02x?}", buf));
+                Status::parse(&buf).map(Some)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e).context("reading printer status"),
         }
@@ -96,7 +113,7 @@ impl UsbPrinter {
 
     /// Reset the printer's receive state and ask for its status.
     pub fn request_status(&mut self) -> Result<Status> {
-        let mut cmd = vec![0u8; INVALIDATE_BYTES];
+        let mut cmd = vec![0u8; STATUS_INVALIDATE];
         cmd.extend_from_slice(&INITIALIZE);
         cmd.extend_from_slice(&STATUS_REQUEST);
         self.write_all(&cmd)?;
@@ -124,14 +141,15 @@ pub enum PrintEvent {
 /// Check the printer and media, send the job and wait until every label is out.
 pub fn print_usb(
     printer: &mut UsbPrinter,
+    model: &Model,
     media: &Media,
     pages: &[&Bitmap],
     opts: &PrintOptions,
     mut on_event: impl FnMut(PrintEvent),
 ) -> Result<()> {
     let status = printer.request_status()?;
-    check_ready(&status, media)?;
-    let job = encode_job(media, pages, opts)?;
+    check_ready(&status, model, media)?;
+    let job = encode_job(model, media, pages, opts)?;
     on_event(PrintEvent::Sending);
     printer.write_all(&job)?;
     let total = pages.len();
@@ -161,9 +179,11 @@ pub fn print_usb(
     Ok(())
 }
 
-pub fn check_ready(status: &Status, media: &Media) -> Result<()> {
-    if !status.is_supported_model() {
-        bail!("{} is not supported (QL-1100, QL-1110NWB and QL-1115NWB are)", status.model_name());
+pub fn check_ready(status: &Status, model: &Model, media: &Media) -> Result<()> {
+    match status.model() {
+        None => bail!("{} is not a known QL or PT model", status.model_name()),
+        Some(m) if m.name != model.name => bail!("{} is connected, but this label is for a {}", m.name, model.name),
+        Some(_) => {}
     }
     if status.has_error() {
         bail!("{}", describe_errors(status));
@@ -181,7 +201,7 @@ fn describe_errors(status: &Status) -> String {
 }
 
 /// A CUPS queue that points at a supported Brother printer (macOS, Linux).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SystemQueue {
     pub name: String,
     pub uri: String,
@@ -196,7 +216,7 @@ pub fn list_system_queues() -> Vec<SystemQueue> {
         .filter_map(|line| {
             let (head, uri) = line.split_once(": ")?;
             let name = head.split_whitespace().last()?.to_string();
-            let wanted = ["QL-1100", "QL-1110", "QL-1115", "QL_1100", "QL_1110", "QL_1115"];
+            let wanted = ["QL-", "QL_", "PT-", "PT_"];
             wanted.iter().any(|w| uri.contains(w) || name.contains(w)).then(|| SystemQueue { name, uri: uri.trim().to_string() })
         })
         .collect()
@@ -204,8 +224,14 @@ pub fn list_system_queues() -> Vec<SystemQueue> {
 
 /// Hand the raw job to the system queue. No status, no media check: the printer's own error light is
 /// the only feedback.
-pub fn print_system_queue(queue: &SystemQueue, media: &Media, pages: &[&Bitmap], opts: &PrintOptions) -> Result<()> {
-    let job = encode_job(media, pages, opts)?;
+pub fn print_system_queue(
+    queue: &SystemQueue,
+    model: &Model,
+    media: &Media,
+    pages: &[&Bitmap],
+    opts: &PrintOptions,
+) -> Result<()> {
+    let job = encode_job(model, media, pages, opts)?;
     let mut child = std::process::Command::new("lp")
         .args(["-d", &queue.name, "-o", "raw", "-t", "Labelwerk"])
         .stdin(std::process::Stdio::piped())

@@ -8,16 +8,15 @@ use qrcode::{EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
 
 use crate::bitmap::Bitmap;
-use crate::media::{Kind, Media, mm_to_dots};
-use crate::protocol::{MAX_CONTINUOUS_LINES, MIN_CONTINUOUS_LINES, MIN_MARGIN_DOTS};
+use crate::media::{Kind, Media, dots_to_mm, mm_to_dots};
+use crate::model::Model;
 
 /// Line height as a multiple of the font size.
 pub const LINE_SPACING: f32 = 1.15;
-/// Blank tape fed before and after a continuous label (the documented minimum, as P-touch Editor sends it).
-pub const FEED_MARGIN_DOTS: u16 = MIN_MARGIN_DOTS;
 /// Longest continuous label the app offers (the printer takes up to 3 m).
 pub const MAX_LENGTH_MM: f32 = 1000.0;
-const FRAME_DOTS: u32 = 5;
+/// Frame line width in mm.
+const FRAME_MM: f32 = 0.42;
 const COVERAGE_THRESHOLD: u8 = 128;
 /// Families tried in order when a label names none or one that is not installed.
 const PREFERRED_FONTS: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Segoe UI", "DejaVu Sans", "Liberation Sans"];
@@ -113,6 +112,7 @@ impl Label {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub kind: Kind,
+    pub dpi: u32,
     pub direction: Direction,
     pub label_w: u32,
     pub label_h: u32,
@@ -123,16 +123,22 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    fn new(media: &Media, direction: Direction, lines: u32) -> Self {
-        let across = mm_to_dots(media.width_mm());
+    /// `feed`: blank tape before and after a continuous label, in dots.
+    fn new(media: &Media, direction: Direction, lines: u32, feed: u32) -> Self {
+        let dpi = media.dpi;
+        let across = mm_to_dots(media.width_mm(), dpi).max(media.print_width);
         let (along, along_offset) = match media.kind {
-            Kind::Continuous => (lines + 2 * FEED_MARGIN_DOTS as u32, FEED_MARGIN_DOTS as u32),
-            _ => (mm_to_dots(media.length_mm()), (mm_to_dots(media.length_mm()).saturating_sub(lines)) / 2),
+            Kind::Continuous => (lines + 2 * feed, feed),
+            _ => {
+                let length = mm_to_dots(media.length_mm(), dpi);
+                (length, length.saturating_sub(lines) / 2)
+            }
         };
         let across_offset = across.saturating_sub(media.print_width) / 2;
         match direction {
             Direction::Along => Self {
                 kind: media.kind,
+                dpi,
                 direction,
                 label_w: along,
                 label_h: across,
@@ -143,6 +149,7 @@ impl Geometry {
             },
             Direction::Across => Self {
                 kind: media.kind,
+                dpi,
                 direction,
                 label_w: across,
                 label_h: along,
@@ -154,8 +161,16 @@ impl Geometry {
         }
     }
 
+    /// Length of the label along the feed, in dots (the variable side of continuous tape).
+    pub fn along_dots(&self) -> u32 {
+        match self.direction {
+            Direction::Along => self.label_w,
+            Direction::Across => self.label_h,
+        }
+    }
+
     pub fn label_mm(&self) -> (f32, f32) {
-        (crate::media::dots_to_mm(self.label_w), crate::media::dots_to_mm(self.label_h))
+        (dots_to_mm(self.label_w, self.dpi), dots_to_mm(self.label_h, self.dpi))
     }
 }
 
@@ -221,7 +236,12 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, label: &Label, media: &Media) -> Rendered {
+    pub fn render(&mut self, label: &Label, model: &Model, media: &Media) -> Rendered {
+        let dpi = model.dpi;
+        let mm = |v: f32| mm_to_dots(v, dpi);
+        let feed = crate::protocol::margin_dots(model, media, &crate::protocol::PrintOptions::default()) as u32;
+        let (min_lines, max_lines) = model.length_limits();
+        let frame_dots = mm(FRAME_MM).max(2);
         let direction = label.direction_for(media);
         let family = self.family_for(label);
         let attrs = Attrs::new()
@@ -232,9 +252,9 @@ impl Renderer {
         let mut warnings = Vec::new();
 
         let across = media.print_width;
-        let pad = mm_to_dots(label.padding_mm.max(0.0));
-        let inset = pad + if label.frame { FRAME_DOTS + pad.max(mm_to_dots(1.0)) } else { 0 };
-        let gap = mm_to_dots(1.5).max(pad);
+        let pad = mm(label.padding_mm.max(0.0));
+        let inset = pad + if label.frame { frame_dots + pad.max(mm(2.0)) } else { 0 };
+        let gap = mm(1.5).max(pad);
         let qr = if label.qr && !label.qr_data().is_empty() {
             match QrCode::with_error_correction_level(label.qr_data().as_bytes(), EcLevel::M) {
                 Ok(code) => Some(code),
@@ -246,13 +266,13 @@ impl Renderer {
         } else {
             None
         };
-        let fixed_px = label.size_pt.map(|pt| pt * 300.0 / 72.0);
+        let fixed_px = label.size_pt.map(|pt| pt * dpi as f32 / 72.0);
         let measure_100 = if text.is_empty() { (0.0, 0.0) } else { self.measure(text, &attrs, 100.0) };
 
         // Length along the feed for continuous tape when it follows the content.
         let auto_lines = |this: &mut Self| -> u32 {
             if text.is_empty() && qr.is_none() {
-                return MIN_CONTINUOUS_LINES;
+                return min_lines;
             }
             let content = match direction {
                 Direction::Along => {
@@ -285,10 +305,10 @@ impl Renderer {
         let lines = match media.kind {
             Kind::Continuous => {
                 let lines = match label.length_mm {
-                    Some(mm) => mm_to_dots(mm.min(MAX_LENGTH_MM)).saturating_sub(2 * FEED_MARGIN_DOTS as u32),
+                    Some(len) => mm(len.min(MAX_LENGTH_MM)).saturating_sub(2 * feed),
                     None => auto_lines(self),
                 };
-                let clamped = lines.clamp(MIN_CONTINUOUS_LINES, MAX_CONTINUOUS_LINES);
+                let clamped = lines.clamp(min_lines, max_lines);
                 if label.length_mm.is_some() && clamped != lines {
                     warnings.push("Length adjusted to what the printer can do".into());
                 }
@@ -296,7 +316,7 @@ impl Renderer {
             }
             _ => media.print_length,
         };
-        let geometry = Geometry::new(media, direction, lines);
+        let geometry = Geometry::new(media, direction, lines, feed);
         let (w, h) = (geometry.print_w, geometry.print_h);
         let mut cov = vec![0u8; (w * h) as usize];
 
@@ -364,7 +384,7 @@ impl Renderer {
             } else if size.0 > bwf + 0.5 || size.1 > bhf + 0.5 {
                 warnings.push("Text does not fit at this size".into());
             }
-            font_pt = Some(px * 72.0 / 300.0);
+            font_pt = Some(px * 72.0 / dpi as f32);
             let tx = match label.align {
                 Align::Left => bx as f32,
                 Align::Center => bx as f32 + (bwf - size.0) / 2.0,
@@ -376,9 +396,9 @@ impl Renderer {
 
         if label.frame {
             if media.kind == Kind::Round {
-                ring(&mut cov, w, h, FRAME_DOTS);
+                ring(&mut cov, w, h, frame_dots);
             } else {
-                let (p, f) = (pad, FRAME_DOTS);
+                let (p, f) = (pad, frame_dots);
                 let (fw, fh) = (w.saturating_sub(2 * p), h.saturating_sub(2 * p));
                 fill(&mut cov, w, p, p, fw, f);
                 fill(&mut cov, w, p, (p + fh).saturating_sub(f), fw, f);
@@ -457,7 +477,7 @@ pub fn preview_rgba(r: &Rendered) -> (u32, u32, Vec<u8>) {
     let (w, h) = (g.label_w, g.label_h);
     let mut px = vec![0u8; (w * h * 4) as usize];
     let corner = match g.kind {
-        Kind::DieCut => mm_to_dots(1.5) as f32,
+        Kind::DieCut => mm_to_dots(1.5, g.dpi) as f32,
         _ => 0.0,
     };
     let inside = |x: u32, y: u32| -> bool {
@@ -475,7 +495,7 @@ pub fn preview_rgba(r: &Rendered) -> (u32, u32, Vec<u8>) {
             Kind::Continuous => true,
         }
     };
-    let dash = |i: u32| (i / 12) % 2 == 0;
+    let dash = |i: u32| (i / 12).is_multiple_of(2);
     for y in 0..h {
         for x in 0..w {
             if !inside(x, y) {
@@ -550,16 +570,20 @@ fn mask_circle(b: &mut Bitmap) {
 mod tests {
     use super::*;
 
-    fn renderer() -> Renderer {
-        Renderer::new()
+    fn ql() -> &'static Model {
+        Model::by_name("QL-1100").unwrap()
+    }
+
+    fn pt() -> &'static Model {
+        Model::by_name("PT-P710BT").unwrap()
     }
 
     #[test]
     fn continuous_label_grows_with_text() {
-        let mut r = renderer();
-        let media = Media::by_key("62").unwrap();
-        let short = r.render(&Label { text: "M3".into(), ..Label::default() }, media);
-        let long = r.render(&Label { text: "M3 Schrauben 10 mm".into(), ..Label::default() }, media);
+        let mut r = Renderer::new();
+        let media = ql().media_by_key("62").unwrap();
+        let short = r.render(&Label { text: "M3".into(), ..Label::default() }, ql(), media);
+        let long = r.render(&Label { text: "M3 Schrauben 10 mm".into(), ..Label::default() }, ql(), media);
         assert_eq!(short.page.width, media.print_width);
         assert!(long.page.height > short.page.height);
         assert!(long.page.black_pixels() > 0);
@@ -569,21 +593,24 @@ mod tests {
 
     #[test]
     fn auto_size_fills_the_tape_height() {
-        let mut r = renderer();
-        let media = Media::by_key("62").unwrap();
-        let out = r.render(&Label { text: "Hg".into(), padding_mm: 0.0, ..Label::default() }, media);
-        // design: along the tape horizontally, across the tape vertically
-        let (_, y0, _, y1) = out.design.ink_bounds().unwrap();
-        let ink = (y1 - y0) as f32 / out.design.height as f32;
-        assert!(ink > 0.6, "text uses only {:.0}% of the tape width", ink * 100.0);
+        let mut r = Renderer::new();
+        for (model, key) in [(ql(), "62"), (pt(), "24"), (pt(), "12")] {
+            let media = model.media_by_key(key).unwrap();
+            let out = r.render(&Label { text: "Hg".into(), padding_mm: 0.0, ..Label::default() }, model, media);
+            // design: along the tape horizontally, across the tape vertically
+            let (_, y0, _, y1) = out.design.ink_bounds().unwrap();
+            let ink = (y1 - y0) as f32 / out.design.height as f32;
+            assert!(ink > 0.6, "{} {key}: text uses only {:.0}% of the tape width", model.name, ink * 100.0);
+        }
     }
 
     #[test]
     fn die_cut_page_has_the_media_size() {
-        let mut r = renderer();
+        let mut r = Renderer::new();
         for key in ["62x29", "29x90", "d24", "102x152"] {
-            let media = Media::by_key(key).unwrap();
-            let out = r.render(&Label { text: "Werkstatt\nRegal 3".into(), qr: true, frame: true, ..Label::default() }, media);
+            let media = ql().media_by_key(key).unwrap();
+            let label = Label { text: "Werkstatt\nRegal 3".into(), qr: true, frame: true, ..Label::default() };
+            let out = r.render(&label, ql(), media);
             assert_eq!((out.page.width, out.page.height), (media.print_width, media.print_length), "{key}");
             assert!(out.page.black_pixels() > 0, "{key}");
             assert!(out.warnings.is_empty(), "{key}: {:?}", out.warnings);
@@ -592,29 +619,40 @@ mod tests {
 
     #[test]
     fn fixed_length_and_size() {
-        let mut r = renderer();
-        let media = Media::by_key("29").unwrap();
+        let mut r = Renderer::new();
+        let media = ql().media_by_key("29").unwrap();
         let label = Label { text: "Kabel".into(), length_mm: Some(50.0), size_pt: Some(24.0), ..Label::default() };
-        let out = r.render(&label, media);
-        assert_eq!(out.page.height, mm_to_dots(50.0) - 2 * FEED_MARGIN_DOTS as u32);
+        let out = r.render(&label, ql(), media);
+        assert_eq!(out.page.height, mm_to_dots(50.0, 300) - 2 * 35);
         assert!((out.font_pt.unwrap() - 24.0).abs() < 0.01);
     }
 
     #[test]
+    fn pt_tape_renders_at_180_dpi() {
+        let mut r = Renderer::new();
+        let media = pt().media_by_key("24").unwrap();
+        let label = Label { text: "Kabel".into(), length_mm: Some(50.0), ..Label::default() };
+        let out = r.render(&label, pt(), media);
+        assert_eq!(out.page.width, 128);
+        assert_eq!(out.page.height, mm_to_dots(50.0, 180) - 2 * 14);
+        let (w, h) = out.geometry.label_mm();
+        assert!((w - 50.0).abs() < 0.3 && (h - 24.0).abs() < 0.3, "{w} x {h}");
+    }
+
+    #[test]
     fn oversized_fixed_text_warns() {
-        let mut r = renderer();
-        let media = Media::by_key("62x29").unwrap();
-        let out = r.render(&Label { text: "Viel zu groß".into(), size_pt: Some(200.0), ..Label::default() }, media);
+        let mut r = Renderer::new();
+        let media = ql().media_by_key("62x29").unwrap();
+        let out = r.render(&Label { text: "Viel zu groß".into(), size_pt: Some(200.0), ..Label::default() }, ql(), media);
         assert!(!out.warnings.is_empty());
     }
 
     #[test]
     fn along_text_reads_left_to_right_from_the_leading_edge() {
-        let mut r = renderer();
-        let media = Media::by_key("62").unwrap();
-        let mut label = Label { text: "I".into(), qr: true, qr_content: "x".into(), align: Align::Left, ..Label::default() };
-        label.padding_mm = 0.0;
-        let out = r.render(&label, media);
+        let mut r = Renderer::new();
+        let media = ql().media_by_key("62").unwrap();
+        let label = Label { text: "I".into(), qr: true, qr_content: "x".into(), align: Align::Left, padding_mm: 0.0, ..Label::default() };
+        let out = r.render(&label, ql(), media);
         // The QR code sits left of the text in design space, so it must leave the printer first.
         let first_ink_row = (0..out.page.height).find(|&y| out.page.row(y).iter().any(|&p| p != 0)).unwrap();
         assert!(first_ink_row < 5, "QR should start at the leading edge, first ink at row {first_ink_row}");

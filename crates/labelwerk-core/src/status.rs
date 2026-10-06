@@ -4,6 +4,7 @@ use anyhow::{Result, ensure};
 use serde::Serialize;
 
 use crate::media::Media;
+use crate::model::{Family, Model};
 
 pub const STATUS_LEN: usize = 32;
 
@@ -40,8 +41,8 @@ pub struct Status {
     pub notification: u8,
 }
 
-/// (byte, mask, message) for every error flag the QL-1100 uses.
-const ERRORS: &[(u8, u8, &str)] = &[
+/// (byte, mask, message) for the error flags of the QL series.
+const QL_ERRORS: &[(u8, u8, &str)] = &[
     (1, 0x01, "No media loaded"),
     (1, 0x04, "Cutter jam"),
     (1, 0x20, "Printer turned off"),
@@ -51,6 +52,17 @@ const ERRORS: &[(u8, u8, &str)] = &[
     (2, 0x10, "Cover open"),
     (2, 0x40, "Media cannot be fed (end of roll?)"),
     (2, 0x80, "System error"),
+];
+
+/// The same for the PT series (Raster Command Reference PT-E550W/P750W/P710BT, status tables 1 and 2).
+const PT_ERRORS: &[(u8, u8, &str)] = &[
+    (1, 0x01, "No media loaded"),
+    (1, 0x04, "Cutter jam"),
+    (1, 0x08, "Weak batteries"),
+    (1, 0x40, "High-voltage adapter"),
+    (2, 0x01, "Wrong media loaded for this label"),
+    (2, 0x10, "Cover open"),
+    (2, 0x20, "Overheating"),
 ];
 
 impl Status {
@@ -84,21 +96,27 @@ impl Status {
         })
     }
 
-    pub fn model_name(&self) -> &'static str {
-        match (self.series_code, self.model_code) {
-            (0x34, 0x43) => "QL-1100",
-            (0x34, 0x44) => "QL-1110NWB",
-            (0x34, 0x45) => "QL-1115NWB",
-            _ => "unknown Brother printer",
+    pub fn model(&self) -> Option<&'static Model> {
+        Model::by_codes(self.series_code, self.model_code)
+    }
+
+    pub fn model_name(&self) -> String {
+        match self.model() {
+            Some(m) => m.name.clone(),
+            None => format!("Brother printer {:02X}/{:02X}", self.series_code, self.model_code),
         }
     }
 
     pub fn is_supported_model(&self) -> bool {
-        self.series_code == 0x34 && matches!(self.model_code, 0x43..=0x45)
+        self.model().is_some()
     }
 
     pub fn errors(&self) -> Vec<&'static str> {
-        ERRORS
+        let table = match self.model().map(|m| m.family) {
+            Some(Family::Pt) => PT_ERRORS,
+            _ => QL_ERRORS,
+        };
+        table
             .iter()
             .filter(|(byte, mask, _)| (if *byte == 1 { self.error1 } else { self.error2 }) & mask != 0)
             .map(|(_, _, msg)| *msg)
@@ -111,7 +129,7 @@ impl Status {
 
     /// The loaded media, if the printer reports one we know.
     pub fn media(&self) -> Option<&'static Media> {
-        Media::from_status(self.media_type, self.media_width_mm, self.media_length_mm)
+        self.model()?.media_from_status(self.media_type, self.media_width_mm, self.media_length_mm)
     }
 
     pub fn cooling(&self) -> bool {
@@ -153,6 +171,19 @@ mod tests {
         .unwrap();
         assert_eq!(s.errors(), ["No media loaded", "Cover open"]);
         assert!(s.media().is_none());
+    }
+
+    /// Captured from a PT-P710BT with 24 mm white laminated tape (2026-10-06).
+    #[test]
+    fn real_p710bt_reply() {
+        let raw = [
+            0x80, 0x20, 0x42, 0x30, 0x76, 0x30, 0x00, 0x00, 0x00, 0x00, 0x18, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let s = Status::parse(&raw).unwrap();
+        assert_eq!(s.model_name(), "PT-P710BT");
+        assert!(!s.has_error());
+        assert_eq!(s.media().unwrap().key(), "24");
     }
 
     #[test]

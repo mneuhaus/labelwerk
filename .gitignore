@@ -5,6 +5,5 @@
 /research/golden/t.prn
 /out
 .DS_Store
-/research/docs/*.pdf
-/research/docs/*.png
-/research/docs/raster.txt
+/dist
+/research/docs/
