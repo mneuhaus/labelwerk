@@ -8,6 +8,8 @@
 mod app;
 mod printer;
 mod store;
+mod tape;
+mod theme;
 
 use std::borrow::Cow;
 
@@ -18,7 +20,7 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Printer, RotateCw, Bold, Italic, RefreshCw, TextAlignStart, TextAlignCenter, TextAlignEnd, Tag, LoaderCircle,
-        Unplug, CircleAlert, CircleCheck
+        Unplug, CircleAlert, CircleCheck, Heading, QrCode, Square, Info
     ]
 );
 
@@ -72,19 +74,21 @@ fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
 fn main() {
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        theme::load_fonts(cx);
+        theme::register(cx);
         apply_theme(None, cx);
         menus(cx);
         app::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
+        let bounds = Bounds::centered(None, size(px(1240.), px(800.)), cx);
         let opened = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Labelwerk".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(16.))),
+                    traffic_light_position: Some(point(px(18.), px(18.))),
                 }),
-                window_min_size: Some(size(px(920.), px(620.))),
+                window_min_size: Some(size(px(980.), px(640.))),
                 ..Default::default()
             },
             cx,

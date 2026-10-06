@@ -10,21 +10,24 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::searchable_list::{SearchableGroup, SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, IndexPath, Selectable as _, Sizable, StyledExt as _, WindowExt};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IndexPath, Selectable as _, Sizable, WindowExt};
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use labelwerk_core::media::dots_to_mm;
-use labelwerk_core::render::preview_png;
+use labelwerk_core::render::{PreviewStyle, preview_png};
 use labelwerk_core::model::Support;
-use labelwerk_core::{Align, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
+use labelwerk_core::{Align, Direction, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
 
 use crate::printer::{self, PrinterState};
+use crate::{tape, theme};
 use crate::store::{self, HistoryEntry, Saved};
 
-const SIDEBAR_W: f32 = 368.;
+const INSPECTOR_W: f32 = 340.;
+const TITLE_H: f32 = 52.;
+const BAR_H: f32 = 72.;
 /// Never draw a label larger than this many screen points per millimetre (about 3x real size).
-const MAX_PREVIEW_PT_PER_MM: f32 = 11.0;
+const MAX_PT_PER_MM: f32 = 11.0;
 
 gpui_kit::actions!(labelwerk, [PrintLabel, RotateLabel]);
 
@@ -120,6 +123,8 @@ pub struct LabelApp {
     printing: bool,
     rendered: Option<Rendered>,
     preview: Option<Arc<Image>>,
+    /// Mini previews of `history` (image, width / height).
+    thumbs: Vec<(Arc<Image>, f32)>,
     text: Entity<TextareaState>,
     font: Entity<SelectState<SearchableVec<SharedString>>>,
     model_select: Entity<SelectState<SearchableVec<SharedString>>>,
@@ -236,6 +241,7 @@ impl LabelApp {
             printing: false,
             rendered: None,
             preview: None,
+            thumbs: Vec::new(),
             text,
             font,
             model_select,
@@ -249,6 +255,7 @@ impl LabelApp {
             _subscriptions: subs,
         };
         this.rerender(window, cx);
+        this.refresh_thumbs();
         this.start_polling(window, cx);
         this
     }
@@ -276,7 +283,9 @@ impl LabelApp {
 
     fn rerender(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rendered = self.renderer.render(&self.label, self.model, self.media);
-        self.preview = Some(Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(&rendered))));
+        let look = self.look();
+        let style = PreviewStyle { paper: look.tape, ink: look.ink, outline: Some(mix(look.tape, look.ink, 0.10)) };
+        self.preview = Some(Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(&rendered, &style))));
         let auto = |v: Option<f32>, unit: &str| v.map(|v| format!("Auto ({} {unit})", mm(v))).unwrap_or_else(|| "Auto".into());
         let size_hint = auto(rendered.font_pt, "pt");
         let length_hint = auto(Some(dots_to_mm(rendered.geometry.along_dots(), rendered.geometry.dpi)), "mm");
@@ -300,6 +309,20 @@ impl LabelApp {
         let key = SharedString::from(media.key());
         self.media_select.update(cx, |s, cx| s.set_selected_value(&key, window, cx));
         self.changed(window, cx);
+    }
+
+    /// Render the history entries small, as they were printed.
+    fn refresh_thumbs(&mut self) {
+        let mut thumbs = Vec::with_capacity(self.history.len());
+        for entry in &self.history {
+            let model = Model::by_name(&entry.model).unwrap_or(self.model);
+            let media = model.media_by_key(&entry.media).unwrap_or(&model.media[0]);
+            let r = self.renderer.render(&entry.label, model, media);
+            let style = PreviewStyle { outline: None, ..PreviewStyle::default() };
+            let aspect = r.geometry.label_w as f32 / r.geometry.label_h.max(1) as f32;
+            thumbs.push((Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(&r, &style))), aspect));
+        }
+        self.thumbs = thumbs;
     }
 
     fn set_media(&mut self, media: &'static Media, window: &mut Window, cx: &mut Context<Self>) {
@@ -354,7 +377,11 @@ impl LabelApp {
             }
         }
         if state != self.printer {
+            let colors_changed = state.colors() != self.printer.colors();
             self.printer = state;
+            if colors_changed {
+                self.rerender(window, cx);
+            }
             cx.notify();
         }
     }
@@ -446,6 +473,7 @@ impl LabelApp {
                 match result {
                     Ok(()) => {
                         store::remember(&mut this.history, entry);
+                        this.refresh_thumbs();
                         store::save(&this.saved());
                         let what = if copies == 1 { "1 Etikett".to_string() } else { format!("{copies} Etiketten") };
                         window.push_notification(Notification::success(format!("{what} auf {}", media_name(media))).title("Gedruckt"), cx);
@@ -462,45 +490,124 @@ impl LabelApp {
 
     // MARK: rendering
 
-    fn printer_badge(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (color, text, icon): (Hsla, String, IconName) = match &self.printer {
-            PrinterState::Searching => (theme.muted_foreground, "Suche Drucker …".into(), IconName::LoaderCircle),
-            PrinterState::Missing { .. } => (theme.muted_foreground, "Kein Drucker".into(), IconName::Unplug),
-            PrinterState::Ready { model, media } => (
-                theme.success,
-                format!("{} · {}", model.name, media.map(media_name).unwrap_or_default()),
-                IconName::Printer,
-            ),
-            PrinterState::Problem { name, message, .. } => (theme.danger, format!("{name} · {message}"), IconName::CircleAlert),
-            PrinterState::Busy { product, .. } => (theme.warning, format!("{product} belegt"), IconName::CircleAlert),
-        };
+    /// How the loaded tape looks, when the printer reports this very medium; plain white otherwise.
+    fn look(&self) -> tape::Look {
+        match &self.printer {
+            PrinterState::Ready { model, media: Some(m), colors } if model.name == self.model.name && m.id == self.media.id => {
+                tape::look(self.model.family, *colors)
+            }
+            _ => tape::PAPER,
+        }
+    }
+
+    fn eyebrow(text: impl Into<SharedString>, cx: &Context<Self>) -> Div {
+        div()
+            .text_xs()
+            .font_family(theme::MONO_FONT)
+            .text_color(cx.theme().muted_foreground)
+            .child(text.into().to_uppercase())
+    }
+
+    fn field(label: &'static str, input: impl IntoElement, cx: &Context<Self>) -> Div {
         h_flex()
-            .id("printer-badge")
-            .gap_2()
-            .px_3()
-            .py_1()
-            .rounded_full()
-            .border_1()
+            .gap_3()
+            .items_center()
+            .child(div().w(px(52.)).text_sm().text_color(cx.theme().muted_foreground).child(label))
+            .child(div().flex_1().child(input))
+    }
+
+    fn render_titlebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let look = self.look();
+        let (dot, title, detail): (Hsla, String, Option<String>) = match &self.printer {
+            PrinterState::Searching => (theme.muted_foreground, "Suche Drucker".into(), None),
+            PrinterState::Missing { .. } => (theme.muted_foreground, "Kein Drucker".into(), None),
+            PrinterState::Ready { model, media, .. } => {
+                (theme.success, model.name.clone(), media.map(|m| media_short(m)))
+            }
+            PrinterState::Problem { name, message, .. } => (theme.danger, name.clone(), Some(message.clone())),
+            PrinterState::Busy { product, .. } => (theme.warning, product.clone(), Some("belegt".into())),
+        };
+        let swatch = matches!(self.printer, PrinterState::Ready { .. }).then(|| {
+            div()
+                .w(px(26.))
+                .h(px(16.))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(rgb_of(look.tape))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb_of(look.ink))
+                .child("Aa")
+        });
+        h_flex()
+            .h(px(52.))
+            .flex_none()
+            .pl(px(84.)) // traffic lights
+            .pr_4()
+            .items_center()
+            .justify_between()
+            .border_b_1()
             .border_color(theme.border)
-            .text_sm()
-            .child(Icon::new(icon).small().text_color(color))
-            .child(div().text_color(theme.foreground).child(text))
+            .bg(theme.title_bar)
+            .child(
+                div()
+                    .font_family(theme::DISPLAY_FONT)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(17.))
+                    .child("Labelwerk"),
+            )
+            .child(
+                h_flex()
+                    .id("printer-status")
+                    .h(px(30.))
+                    .px_3()
+                    .gap_2()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .child(div().size(px(8.)).rounded_full().bg(dot))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                    .children(swatch)
+                    .children(detail.map(|d| {
+                        div().text_xs().font_family(theme::MONO_FONT).text_color(theme.muted_foreground).child(d)
+                    })),
+            )
     }
 
-    fn section(title: &'static str, cx: &Context<Self>) -> Div {
-        v_flex().gap_2().child(
-            div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child(title.to_uppercase()),
-        )
-    }
-
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_inspector(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let continuous = self.media.kind == Kind::Continuous;
         let align = self.label.align;
-        let loaded = self.printer.loaded_media();
+        let loaded = self.printer.loaded_media().filter(|_| self.printer.model().is_some_and(|m| m.name == self.model.name));
+        let unit = |u: &'static str| div().text_xs().font_family(theme::MONO_FONT).text_color(theme.muted_foreground).child(u);
 
-        let text = Self::section("Text", cx)
+        let tile = |id: &'static str, icon: IconName, title: &'static str, on: bool| {
+            v_flex()
+                .id(id)
+                .flex_1()
+                .h(px(64.))
+                .gap_1()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .border_1()
+                .cursor_pointer()
+                .when(on, |d| d.border_color(theme.ring).bg(theme.selection))
+                .when(!on, |d| d.border_color(theme.border).bg(theme.background).hover(|s| s.bg(theme.accent)))
+                .child(Icon::new(icon).size(px(18.)).text_color(if on { theme.foreground } else { theme.muted_foreground }))
+                .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(title))
+        };
+
+        let text = v_flex()
+            .gap_2()
+            .child(Self::eyebrow("Text", cx))
             .child(Textarea::new(&self.text))
             .child(
                 h_flex()
@@ -539,28 +646,49 @@ impl LabelApp {
                                 this.changed(window, cx);
                             })),
                     )
-                    .child(
-                        div().flex_1().child(
-                            NumberInput::new(&self.size)
-                                .small()
-                                .suffix(div().text_xs().text_color(theme.muted_foreground).child("pt")),
-                        ),
-                    ),
+                    .child(div().flex_1().child(NumberInput::new(&self.size).small().suffix(unit("pt")))),
             );
+
+        let design = v_flex()
+            .gap_2()
+            .child(Self::eyebrow("Gestaltung", cx))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(tile("t-heading", IconName::Heading, "Überschrift", self.label.heading).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.label.heading = !this.label.heading;
+                            this.changed(window, cx);
+                        },
+                    )))
+                    .child(tile("t-qr", IconName::QrCode, "QR-Code", self.label.qr).on_click(cx.listener(|this, _, window, cx| {
+                        this.label.qr = !this.label.qr;
+                        this.changed(window, cx);
+                    })))
+                    .child(tile("t-frame", IconName::Square, "Rahmen", self.label.frame).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.label.frame = !this.label.frame;
+                            this.changed(window, cx);
+                        },
+                    ))),
+            )
+            .when(self.label.qr, |s| s.child(Input::new(&self.qr_text).small().prefix(Icon::new(IconName::QrCode).xsmall())));
 
         let support_hint = match self.model.protocol.support {
             Support::Verified => None,
-            Support::Documented => Some("Nach Brothers Befehlsreferenz für dieses Modell umgesetzt"),
-            Support::Assumed => Some("Für dieses Modell noch ungetestet (abgeleitet aus verwandten Modellen)"),
+            Support::Documented => Some("Nach Brothers Befehlsreferenz umgesetzt"),
+            Support::Assumed => Some("Ungetestet, abgeleitet aus verwandten Modellen"),
         };
-        let media = Self::section("Drucker & Etikett", cx)
+        let tape = v_flex()
+            .gap_2()
+            .child(Self::eyebrow("Drucker & Band", cx))
             .child(Select::new(&self.model_select).small().search_placeholder("Modell suchen"))
             .when_some(support_hint, |s, hint| s.child(div().text_xs().text_color(theme.muted_foreground).child(hint)))
             .child(Select::new(&self.media_select).small().menu_max_h(rems(28.)))
             .child(
                 Switch::new("follow")
                     .checked(self.follow_printer)
-                    .label("Eingelegte Rolle automatisch übernehmen")
+                    .label("Eingelegtes Band übernehmen")
                     .small()
                     .on_click(cx.listener(|this, checked: &bool, window, cx| {
                         this.follow_printer = *checked;
@@ -571,196 +699,300 @@ impl LabelApp {
                         cx.notify();
                     })),
             )
-            .when(continuous, |s| {
-                s.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().w(px(64.)).text_sm().text_color(theme.muted_foreground).child("Länge"))
-                        .child(
-                            div().flex_1().child(
-                                NumberInput::new(&self.length)
-                                    .small()
-                                    .suffix(div().text_xs().text_color(theme.muted_foreground).child("mm")),
-                            ),
-                        ),
-                )
-            })
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(px(64.)).text_sm().text_color(theme.muted_foreground).child("Rand"))
-                    .child(
-                        div().flex_1().child(
-                            NumberInput::new(&self.padding)
-                                .small()
-                                .suffix(div().text_xs().text_color(theme.muted_foreground).child("mm")),
-                        ),
-                    ),
-            )
             .when_some(loaded.filter(|l| l.id != self.media.id), |s, l| {
                 s.child(
                     Button::new("use-loaded")
                         .small()
                         .outline()
                         .icon(IconName::RefreshCw)
-                        .label(format!("Eingelegte Rolle nehmen: {}", media_name(l)))
+                        .label(format!("Eingelegt: {}", media_name(l)))
                         .on_click(cx.listener(|this, _, window, cx| this.use_loaded_media(window, cx))),
                 )
-            });
-
-        let extras = Self::section("Extras", cx)
-            .child(
-                Switch::new("qr")
-                    .checked(self.label.qr)
-                    .label("QR-Code")
-                    .small()
-                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                        this.label.qr = *checked;
-                        this.changed(window, cx);
-                    })),
-            )
-            .when(self.label.qr, |s| s.child(Input::new(&self.qr_text).small()))
-            .child(
-                Switch::new("frame")
-                    .checked(self.label.frame)
-                    .label("Rahmen")
-                    .small()
-                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                        this.label.frame = *checked;
-                        this.changed(window, cx);
-                    })),
-            );
-
-        let history = (!self.history.is_empty()).then(|| {
-            Self::section("Zuletzt gedruckt", cx).child(v_flex().gap_1().children(self.history.iter().take(10).enumerate().map(
-                |(i, entry)| {
-                    let e = entry.clone();
-                    let sub = Model::by_name(&entry.model)
-                        .unwrap_or(self.model)
-                        .media_by_key(&entry.media)
-                        .map(media_name)
-                        .unwrap_or_default();
-                    h_flex()
-                        .id(("history", i))
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.accent))
-                        .child(Icon::new(IconName::Tag).small().text_color(theme.muted_foreground))
-                        .child(div().flex_1().min_w_0().truncate().text_sm().child(entry.title()))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(sub))
-                        .on_click(cx.listener(move |this, _, window, cx| this.load_history(e.clone(), window, cx)))
-                },
-            )))
-        });
+            })
+            .when(continuous, |s| s.child(Self::field("Länge", NumberInput::new(&self.length).small().suffix(unit("mm")), cx)))
+            .child(Self::field("Rand", NumberInput::new(&self.padding).small().suffix(unit("mm")), cx));
 
         v_flex()
-            .id("sidebar")
-            .w(px(SIDEBAR_W))
+            .id("inspector")
+            .w(px(INSPECTOR_W))
             .h_full()
             .flex_none()
             .overflow_y_scroll()
             .border_r_1()
             .border_color(theme.border)
             .bg(theme.sidebar)
-            .p_4()
-            .gap_5()
+            .px_5()
+            .py_5()
+            .gap_6()
             .child(text)
-            .child(media)
-            .child(extras)
-            .children(history)
+            .child(design)
+            .child(tape)
     }
 
-    fn render_preview(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let Some(r) = &self.rendered else { return div().flex_1() };
-        let g = &r.geometry;
+    fn render_mat(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let mat_ink = rgba(theme::MAT_INK);
+        let Some(r) = &self.rendered else { return div().flex_1().bg(rgb(theme::MAT)) };
+        let g = r.geometry;
+        let look = self.look();
         let view = window.viewport_size();
-        let avail_w = (f32::from(view.width) - SIDEBAR_W - 96.).max(100.);
-        let avail_h = (f32::from(view.height) - 48. - 76. - 120.).max(100.);
-        let (label_w_mm, label_h_mm) = g.label_mm();
-        let pt_per_mm = (avail_w / label_w_mm).min(avail_h / label_h_mm).min(MAX_PREVIEW_PT_PER_MM);
-        let mut info = vec![match self.media.kind {
-            Kind::Continuous => format!("Länge {} mm", mm(dots_to_mm(g.along_dots(), g.dpi))),
-            _ => format!("Druckbereich {} × {} mm", mm(dots_to_mm(g.print_w, g.dpi)), mm(dots_to_mm(g.print_h, g.dpi))),
-        }];
-        if let Some(pt) = r.font_pt {
-            info.push(format!("Schrift {} pt{}", mm(pt), if self.label.size_pt.is_none() { " (auto)" } else { "" }));
-        }
-        if self.media.kind == Kind::Continuous && self.label.length_mm.is_none() {
-            info.push("Länge passt sich an".into());
-        }
+        let mat_w = (f32::from(view.width) - INSPECTOR_W).max(200.);
+        let mat_h = (f32::from(view.height) - TITLE_H - BAR_H).max(200.);
+        let (w_mm, h_mm) = g.label_mm();
+        let s = ((mat_w - 260.) / w_mm).min((mat_h - 220.) / h_mm).clamp(0.5, MAX_PT_PER_MM);
+        let (lw, lh) = (w_mm * s, h_mm * s);
+        let (left, top) = ((mat_w - lw) / 2., (mat_h - lh) / 2.);
+        // the tape runs along the feed: horizontally when the text runs along it
+        let horizontal = g.direction == Direction::Along;
+        let tape_rgb = rgb_of(look.tape);
 
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .justify_center()
-            .gap_4()
+        let grid = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let step = 10. * s;
+                let (minor, major) = if step >= 14. { (1, 5) } else { (5, 10) };
+                let x0 = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - lw) / 2.;
+                let y0 = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - lh) / 2.;
+                let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                let first = |origin: f32, start: f32| ((start - origin) / step).floor() as i32;
+                for i in first(x0, bx)..=first(x0, bx + bw) + 1 {
+                    if i % minor != 0 {
+                        continue;
+                    }
+                    let x = x0 + i as f32 * step;
+                    let color = if i % major == 0 { theme::MAT_GRID_MAJOR } else { theme::MAT_GRID };
+                    window.paint_quad(fill(Bounds::new(point(px(x), px(by)), size(px(1.), px(bh))), rgba(color)));
+                }
+                for j in first(y0, by)..=first(y0, by + bh) + 1 {
+                    if j % minor != 0 {
+                        continue;
+                    }
+                    let y = y0 + j as f32 * step;
+                    let color = if j % major == 0 { theme::MAT_GRID_MAJOR } else { theme::MAT_GRID };
+                    window.paint_quad(fill(Bounds::new(point(px(bx), px(y)), size(px(bw), px(1.))), rgba(color)));
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        // Tape or liner beyond the label, fading out, with the cut marked.
+        let ext = (if horizontal { lw } else { lh } * 0.45).clamp(40., 180.);
+        let fade = |to_outside: bool, color: Hsla| {
+            let (a, b) = (color.opacity(0.0), color.opacity(0.55));
+            let angle = if horizontal { 90. } else { 180. };
+            if to_outside {
+                linear_gradient(angle, linear_color_stop(b, 0.), linear_color_stop(a, 1.))
+            } else {
+                linear_gradient(angle, linear_color_stop(a, 0.), linear_color_stop(b, 1.))
+            }
+        };
+        let continuous = g.kind == Kind::Continuous;
+        let strip_color = if continuous { tape_rgb } else { hsla(0., 0., 1., 0.5) };
+        let gap = if continuous { 0. } else { 3. * s };
+        let strip = |before: bool| {
+            let d = div().absolute().bg(fade(!before, strip_color));
+            if horizontal {
+                d.left(px(if before { left - ext - gap } else { left + lw + gap })).top(px(top)).w(px(ext)).h(px(lh))
+            } else {
+                d.top(px(if before { top - ext - gap } else { top + lh + gap })).left(px(left)).w(px(lw)).h(px(ext))
+            }
+        };
+        let cut = |at_start: bool| {
+            let d = div().absolute().border_color(mat_ink.opacity(0.7));
+            if horizontal {
+                let x = if at_start { left } else { left + lw };
+                d.left(px(x - 0.5)).top(px(top - 10.)).h(px(lh + 20.)).w(px(1.)).border_l_1().border_dashed()
+            } else {
+                let y = if at_start { top } else { top + lh };
+                d.top(px(y - 0.5)).left(px(left - 10.)).w(px(lw + 20.)).h(px(1.)).border_t_1().border_dashed()
+            }
+        };
+
+        // Measurement like on a drawing, along the feed only (the other side is the tape or label width, named
+        // above), on the side the tape does not run through.
+        let mono = |t: String| {
+            div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(mat_ink).whitespace_nowrap().child(t)
+        };
+        let dim_y = top + lh + 26.;
+        let dim_x = left + lw + 26.;
+        let h_dim = div()
+            .absolute()
+            .left(px(left))
+            .top(px(dim_y - 8.))
+            .w(px(lw))
+            .h(px(16.))
+            .child(div().absolute().left_0().top(px(7.5)).w_full().h(px(1.)).bg(mat_ink.opacity(0.6)))
+            .child(div().absolute().left_0().top_0().w(px(1.)).h_full().bg(mat_ink))
+            .child(div().absolute().right_0().top_0().w(px(1.)).h_full().bg(mat_ink))
             .child(
                 h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_sm().font_semibold().child(media_name(self.media)))
-                    .child(
-                        Button::new("rotate")
-                            .small()
-                            .ghost()
-                            .icon(IconName::RotateCw)
-                            .label("Drehen")
-                            .tooltip("Textrichtung drehen (⌘R)")
-                            .on_click(cx.listener(|this, _, window, cx| this.toggle_direction(window, cx))),
-                    ),
-            )
+                    .absolute()
+                    .size_full()
+                    .justify_center()
+                    .child(div().px_2().bg(rgb(theme::MAT)).child(mono(format!("{} mm", mm(w_mm))))),
+            );
+        let v_dim = div()
+            .absolute()
+            .left(px(dim_x - 8.))
+            .top(px(top))
+            .w(px(16.))
+            .h(px(lh))
+            .child(div().absolute().top_0().left(px(7.5)).h_full().w(px(1.)).bg(mat_ink.opacity(0.6)))
+            .child(div().absolute().top_0().left_0().h(px(1.)).w_full().bg(mat_ink))
+            .child(div().absolute().bottom_0().left_0().h(px(1.)).w_full().bg(mat_ink))
             .child(
                 div()
-                    .w(px(label_w_mm * pt_per_mm))
-                    .h(px(label_h_mm * pt_per_mm))
-                    .when_some(self.preview.clone(), |d, p| d.child(img(p).size_full())),
-            )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(info.join("  ·  ")))
-            .children(r.warnings.iter().map(|w| {
-                h_flex()
+                    .absolute()
+                    .left(px(22.))
+                    .top(px(lh / 2. - 9.))
+                    .child(mono(format!("{} mm", mm(h_mm)))),
+            );
+
+        let label = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(lw))
+            .h(px(lh))
+            .shadow_lg()
+            .when(g.kind == Kind::Round, |d| d.rounded_full())
+            .when(g.kind == Kind::DieCut, |d| d.rounded(px(1.5 * s)))
+            .when_some(self.preview.clone(), |d, p| d.child(img(p).size_full()));
+
+        let mut info = vec![media_name(self.media).to_uppercase()];
+        if matches!(self.printer, PrinterState::Ready { .. }) && self.model.family == Family::Pt {
+            info.push(format!("{} / {}", look.tape_name, look.ink_name).to_uppercase());
+        }
+        let mut detail = Vec::new();
+        if let Some(pt) = r.font_pt {
+            detail.push(format!("Schrift {} pt{}", mm(pt), if self.label.size_pt.is_none() { " · auto" } else { "" }));
+        }
+        if continuous && self.label.length_mm.is_none() {
+            detail.push("Länge folgt dem Text".into());
+        }
+        let blocker = self.blocker().filter(|_| !self.printing);
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .overflow_hidden()
+            .bg(rgb(theme::MAT))
+            .child(grid)
+            .child(strip(true))
+            .child(strip(false))
+            .when(continuous, |d| d.child(cut(true)).child(cut(false)))
+            .child(label)
+            .child(if horizontal { h_dim } else { v_dim })
+            .child(
+                v_flex()
+                    .absolute()
+                    .top(px(18.))
+                    .left(px(20.))
                     .gap_1()
-                    .text_xs()
-                    .text_color(theme.warning)
-                    .child(Icon::new(IconName::CircleAlert).xsmall())
-                    .child(match w.as_str() {
-                        "Text does not fit at this size" => "Text passt in dieser Größe nicht aufs Etikett".to_string(),
-                        "QR code is too small for this label" => "QR-Code ist für dieses Etikett zu klein".to_string(),
-                        other => other.to_string(),
-                    })
-            }))
+                    .child(div().font_family(theme::MONO_FONT).text_xs().text_color(mat_ink).child(info.join("  ·  ")))
+                    .child(div().text_xs().text_color(mat_ink.opacity(0.7)).child(detail.join("  ·  "))),
+            )
+            .child(
+                h_flex().absolute().top(px(12.)).right(px(14.)).child(
+                    Button::new("rotate")
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(IconName::RotateCw).text_color(mat_ink))
+                        .child(div().text_color(mat_ink).child("Drehen"))
+                        .tooltip("Textrichtung drehen (⌘R)")
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_direction(window, cx))),
+                ),
+            )
+            .child(
+                v_flex()
+                    .absolute()
+                    .bottom(px(16.))
+                    .left_0()
+                    .right_0()
+                    .items_center()
+                    .gap_2()
+                    .children(r.warnings.iter().map(|w| {
+                        h_flex()
+                            .gap_2()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(theme.warning)
+                            .text_color(theme.warning_foreground)
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(Icon::new(IconName::CircleAlert).xsmall())
+                            .child(german_warning(w))
+                    }))
+                    .children(blocker.map(|b| {
+                        h_flex()
+                            .gap_2()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(hsla(0., 0., 0., 0.35))
+                            .text_color(mat_ink)
+                            .text_xs()
+                            .child(Icon::new(IconName::Info).xsmall())
+                            .child(b)
+                    })),
+            )
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let blocker = self.blocker();
-        let via_queue = matches!(self.printer, PrinterState::Busy { queue: Some(_), .. });
+        let blocked = self.blocker().is_some();
         let label = if self.printing { "Druckt …" } else { "Drucken" };
+        let thumbs = self.history.iter().zip(&self.thumbs).take(12).enumerate().map(|(i, (entry, thumb))| {
+            let e = entry.clone();
+            let (image, aspect) = thumb.clone();
+            let h = 38.;
+            div()
+                .id(("history", i))
+                .flex_none()
+                .h(px(h))
+                .w(px((h * aspect).clamp(24., 150.)))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden()
+                .cursor_pointer()
+                .hover(|s| s.border_color(theme.ring))
+                .child(img(image).size_full())
+                .tooltip({
+                    let t = entry.title();
+                    move |w, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(w, cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.load_history(e.clone(), window, cx)))
+        });
         h_flex()
-            .h(px(76.))
-            .px_6()
+            .h(px(BAR_H))
+            .flex_none()
+            .px_5()
             .gap_4()
             .items_center()
             .border_t_1()
             .border_color(theme.border)
+            .bg(theme.background)
             .child(
-                div()
+                h_flex()
+                    .id("history-strip")
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .when_some(blocker.clone().filter(|_| !self.printing), |d, b| d.child(b))
-                    .when(blocker.is_none() && via_queue, |d| d.child("USB belegt, sende über die Druckwarteschlange")),
+                    .gap_2()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .when(!self.history.is_empty(), |d| d.child(div().pr_1().child(Self::eyebrow("Zuletzt", cx))))
+                    .when(self.history.is_empty(), |d| {
+                        d.child(div().text_sm().text_color(theme.muted_foreground).child("Gedruckte Etiketten erscheinen hier zum Nachdrucken."))
+                    })
+                    .children(thumbs),
             )
             .child(div().text_sm().text_color(theme.muted_foreground).child("Anzahl"))
-            .child(div().w(px(110.)).child(NumberInput::new(&self.copies_input)))
+            .child(div().w(px(116.)).child(NumberInput::new(&self.copies_input)))
             .child(
                 Button::new("print")
                     .primary()
@@ -768,10 +1000,38 @@ impl LabelApp {
                     .icon(IconName::Printer)
                     .label(label)
                     .loading(self.printing)
-                    .disabled(blocker.is_some())
+                    .disabled(blocked)
                     .tooltip("Drucken (⌘P)")
                     .on_click(cx.listener(|this, _, window, cx| this.print(window, cx))),
             )
+    }
+}
+
+fn german_warning(w: &str) -> String {
+    match w {
+        "Text does not fit at this size" => "Text passt in dieser Größe nicht aufs Etikett".into(),
+        "QR code is too small for this label" => "QR-Code ist für dieses Etikett zu klein".into(),
+        "Length adjusted to what the printer can do" => "Länge an die Grenzen des Druckers angepasst".into(),
+        other => other.to_string(),
+    }
+}
+
+/// `a` moved towards `b` by `t`.
+fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
+}
+
+fn rgb_of(c: [u8; 3]) -> Hsla {
+    rgb(u32::from_be_bytes([0, c[0], c[1], c[2]])).into()
+}
+
+/// Short media name for the status pill: "24 mm", "62 × 29".
+fn media_short(m: &Media) -> String {
+    let (w, l) = m.nominal_mm();
+    match m.kind {
+        Kind::DieCut => format!("{} × {}", mm(w), mm(l)),
+        Kind::Round => format!("Ø {}", mm(w)),
+        Kind::Continuous => format!("{} mm", mm(w)),
     }
 }
 
@@ -784,9 +1044,10 @@ impl Focusable for LabelApp {
 impl Render for LabelApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let sidebar = self.render_sidebar(cx);
-        let preview = self.render_preview(window, cx);
-        let footer = self.render_footer(cx);
+        let titlebar = self.render_titlebar(cx);
+        let inspector = self.render_inspector(cx);
+        let mat = self.render_mat(window, cx);
+        let bar = self.render_bar(cx);
         v_flex()
             .key_context("Labelwerk")
             .track_focus(&self.focus)
@@ -795,26 +1056,9 @@ impl Render for LabelApp {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(
-                h_flex()
-                    .h(px(48.))
-                    .flex_none()
-                    .pl(px(84.)) // room for the macOS traffic lights
-                    .pr_4()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(div().font_semibold().child("Labelwerk"))
-                    .child(self.printer_badge(cx)),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_stretch()
-                    .child(sidebar)
-                    .child(v_flex().flex_1().min_w_0().h_full().bg(theme.muted).child(preview).child(footer)),
-            )
+            .font_family(theme::UI_FONT)
+            .child(titlebar)
+            .child(h_flex().flex_1().min_h_0().items_stretch().child(inspector).child(mat))
+            .child(bar)
     }
 }

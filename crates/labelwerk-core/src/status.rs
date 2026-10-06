@@ -34,6 +34,9 @@ pub struct Status {
     pub error2: u8,
     pub media_width_mm: u8,
     pub media_type: u8,
+    /// PT tape colour and print colour ids (Raster Command Reference PT, status tables 8 and 9).
+    pub tape_color: u8,
+    pub text_color: u8,
     pub media_length_mm: u8,
     pub mode: u8,
     pub status_type: StatusType,
@@ -76,6 +79,8 @@ impl Status {
             error2: b[9],
             media_width_mm: b[10],
             media_type: b[11],
+            tape_color: b[24],
+            text_color: b[25],
             mode: b[15],
             media_length_mm: b[17],
             status_type: match b[18] {

@@ -14,7 +14,8 @@ pub enum PrinterState {
     Searching,
     /// No printer on USB; a system queue may still exist.
     Missing { queue: Option<SystemQueue> },
-    Ready { model: &'static Model, media: Option<&'static Media> },
+    /// `colors`: (tape, print) colour ids reported by PT printers.
+    Ready { model: &'static Model, media: Option<&'static Media>, colors: Option<(u8, u8)> },
     Problem { name: String, model: Option<&'static Model>, media: Option<&'static Media>, message: String },
     /// Found on USB but could not be opened (another program is using it).
     Busy { product: String, message: String, queue: Option<SystemQueue> },
@@ -25,6 +26,13 @@ impl PrinterState {
         match self {
             PrinterState::Ready { model, .. } => Some(model),
             PrinterState::Problem { model, .. } => *model,
+            _ => None,
+        }
+    }
+
+    pub fn colors(&self) -> Option<(u8, u8)> {
+        match self {
+            PrinterState::Ready { colors, .. } => *colors,
             _ => None,
         }
     }
@@ -73,7 +81,10 @@ pub fn poll() -> PrinterState {
                     media,
                     message: "Unbekanntes Band / Etikett eingelegt".into(),
                 },
-                Some(model) => PrinterState::Ready { model, media },
+                Some(model) => {
+                    let colors = (model.family == labelwerk_core::Family::Pt).then_some((s.tape_color, s.text_color));
+                    PrinterState::Ready { model, media, colors }
+                }
             }
         }
         Err(e) => PrinterState::Busy { product: device.product.clone(), message: format!("{e:#}"), queue: queue() },

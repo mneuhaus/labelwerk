@@ -18,8 +18,18 @@ pub const MAX_LENGTH_MM: f32 = 1000.0;
 /// Frame line width in mm.
 const FRAME_MM: f32 = 0.42;
 const COVERAGE_THRESHOLD: u8 = 128;
+/// Label font shipped with Labelwerk (SIL Open Font License), so labels look the same on every computer.
+pub const BUNDLED_FONT: &str = "Barlow Semi Condensed";
+const BUNDLED_FONT_FILES: &[&[u8]] = &[
+    include_bytes!("../fonts/BarlowSemiCondensed-Regular.ttf"),
+    include_bytes!("../fonts/BarlowSemiCondensed-Italic.ttf"),
+    include_bytes!("../fonts/BarlowSemiCondensed-Bold.ttf"),
+    include_bytes!("../fonts/BarlowSemiCondensed-BoldItalic.ttf"),
+];
 /// Families tried in order when a label names none or one that is not installed.
-const PREFERRED_FONTS: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Segoe UI", "DejaVu Sans", "Liberation Sans"];
+const PREFERRED_FONTS: &[&str] = &[BUNDLED_FONT, "Helvetica Neue", "Helvetica", "Arial", "Segoe UI", "DejaVu Sans"];
+/// Size of an emphasised first line relative to the other lines.
+pub const HEADING_SCALE: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Align {
@@ -77,6 +87,8 @@ pub struct Label {
     /// QR code content; empty encodes the label text.
     pub qr_content: String,
     pub frame: bool,
+    /// First line larger and bold, the rest as normal text.
+    pub heading: bool,
 }
 
 impl Default for Label {
@@ -94,6 +106,7 @@ impl Default for Label {
             qr: false,
             qr_content: String::new(),
             frame: false,
+            heading: false,
         }
     }
 }
@@ -187,6 +200,12 @@ pub struct Rendered {
     pub warnings: Vec<String>,
 }
 
+/// Font attributes plus the label's line structure.
+struct TextStyle<'a> {
+    attrs: Attrs<'a>,
+    heading: bool,
+}
+
 pub struct Renderer {
     fonts: FontSystem,
     cache: SwashCache,
@@ -202,7 +221,10 @@ impl Default for Renderer {
 impl Renderer {
     /// Loads the system fonts; takes a moment, create it once.
     pub fn new() -> Self {
-        let fonts = FontSystem::new();
+        let mut fonts = FontSystem::new();
+        for font in BUNDLED_FONT_FILES {
+            fonts.db_mut().load_font_data(font.to_vec());
+        }
         let mut families: Vec<String> = fonts
             .db()
             .faces()
@@ -249,6 +271,7 @@ impl Renderer {
             .weight(if label.bold { Weight::BOLD } else { Weight::NORMAL })
             .style(if label.italic { Style::Italic } else { Style::Normal });
         let text = label.text.trim_end_matches(['\n', ' ']);
+        let style = TextStyle { attrs, heading: label.heading && text.contains('\n') };
         let mut warnings = Vec::new();
 
         let across = media.print_width;
@@ -267,7 +290,7 @@ impl Renderer {
             None
         };
         let fixed_px = label.size_pt.map(|pt| pt * dpi as f32 / 72.0);
-        let measure_100 = if text.is_empty() { (0.0, 0.0) } else { self.measure(text, &attrs, 100.0) };
+        let measure_100 = if text.is_empty() { (0.0, 0.0) } else { self.measure(text, &style, 100.0) };
 
         // Length along the feed for continuous tape when it follows the content.
         let auto_lines = |this: &mut Self| -> u32 {
@@ -282,7 +305,7 @@ impl Renderer {
                         0.0
                     } else {
                         let px = fixed_px.unwrap_or(100.0 * box_h / measure_100.1.max(1.0));
-                        this.measure(text, &attrs, px).0
+                        this.measure(text, &style, px).0
                     };
                     qr_side + if qr.is_some() && text_w > 0.0 { gap as f32 } else { 0.0 } + text_w
                 }
@@ -294,7 +317,7 @@ impl Renderer {
                         0.0
                     } else {
                         let px = fixed_px.unwrap_or(100.0 * text_box_w / measure_100.0.max(1.0));
-                        this.measure(text, &attrs, px).1
+                        this.measure(text, &style, px).1
                     };
                     text_h.max(qr_side)
                 }
@@ -372,14 +395,14 @@ impl Renderer {
                     }
                 }
             };
-            let mut size = self.measure(text, &attrs, px);
+            let mut size = self.measure(text, &style, px);
             if fixed_px.is_none() {
                 for _ in 0..12 {
                     if size.0 <= bwf + 0.5 && size.1 <= bhf + 0.5 {
                         break;
                     }
                     px *= 0.97;
-                    size = self.measure(text, &attrs, px);
+                    size = self.measure(text, &style, px);
                 }
             } else if size.0 > bwf + 0.5 || size.1 > bhf + 0.5 {
                 warnings.push("Text does not fit at this size".into());
@@ -391,7 +414,7 @@ impl Renderer {
                 Align::Right => bx as f32 + bwf - size.0,
             };
             let ty = by as f32 + (bhf - size.1) / 2.0;
-            self.draw_text(text, &attrs, px, label.align, size.0, &mut cov, w, h, tx.round() as i32, ty.round() as i32);
+            self.draw_text(text, &style, px, label.align, size.0, &mut cov, w, h, tx.round() as i32, ty.round() as i32);
         }
 
         if label.frame {
@@ -418,7 +441,7 @@ impl Renderer {
         Rendered { design, page, geometry, font_pt, warnings }
     }
 
-    fn buffer(&mut self, text: &str, attrs: &Attrs, px: f32, align: Align, width: Option<f32>) -> Buffer {
+    fn buffer(&mut self, text: &str, style: &TextStyle, px: f32, align: Align, width: Option<f32>) -> Buffer {
         let mut buf = Buffer::new(&mut self.fonts, Metrics::new(px, px * LINE_SPACING));
         buf.set_size(width, None);
         let align = match align {
@@ -426,14 +449,23 @@ impl Renderer {
             Align::Center => CtAlign::Center,
             Align::Right => CtAlign::Right,
         };
-        buf.set_text(text, attrs, Shaping::Advanced, Some(align));
+        match (style.heading, text.split_once('\n')) {
+            (true, Some((first, rest))) => {
+                let big = px * HEADING_SCALE;
+                let head = style.attrs.clone().weight(Weight::BOLD).metrics(Metrics::new(big, big * LINE_SPACING));
+                let first = &text[..first.len() + 1]; // keep the line break with the heading
+                let spans = [(first, head), (rest, style.attrs.clone())];
+                buf.set_rich_text(spans, &style.attrs, Shaping::Advanced, Some(align));
+            }
+            _ => buf.set_text(text, &style.attrs, Shaping::Advanced, Some(align)),
+        }
         buf.shape_until_scroll(&mut self.fonts, false);
         buf
     }
 
     /// Width and height of the laid-out text block at `px`.
-    fn measure(&mut self, text: &str, attrs: &Attrs, px: f32) -> (f32, f32) {
-        let buf = self.buffer(text, attrs, px, Align::Left, None);
+    fn measure(&mut self, text: &str, style: &TextStyle, px: f32) -> (f32, f32) {
+        let buf = self.buffer(text, style, px, Align::Left, None);
         buf.layout_runs().fold((0.0f32, 0.0f32), |(w, h), run| (w.max(run.line_w), h.max(run.line_top + run.line_height)))
     }
 
@@ -441,7 +473,7 @@ impl Renderer {
     fn draw_text(
         &mut self,
         text: &str,
-        attrs: &Attrs,
+        style: &TextStyle,
         px: f32,
         align: Align,
         block_w: f32,
@@ -451,7 +483,7 @@ impl Renderer {
         ox: i32,
         oy: i32,
     ) {
-        let mut buf = self.buffer(text, attrs, px, align, Some(block_w.ceil() + 1.0));
+        let mut buf = self.buffer(text, style, px, align, Some(block_w.ceil() + 1.0));
         buf.draw(&mut self.fonts, &mut self.cache, Color::rgb(0, 0, 0), |x, y, rw, rh, color| {
             let a = color.a();
             if a == 0 {
@@ -470,9 +502,23 @@ impl Renderer {
     }
 }
 
+/// Colours of the preview: the tape or paper, the print, and the printable-area outline (`None` = hidden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewStyle {
+    pub paper: [u8; 3],
+    pub ink: [u8; 3],
+    pub outline: Option<[u8; 3]>,
+}
+
+impl Default for PreviewStyle {
+    fn default() -> Self {
+        Self { paper: [255, 255, 255], ink: [17, 17, 17], outline: Some([205, 212, 220]) }
+    }
+}
+
 /// The whole label as RGBA at printer resolution: paper in its real shape (transparent around it), the
-/// printed pixels in black and a faint dashed outline of the printable area.
-pub fn preview_rgba(r: &Rendered) -> (u32, u32, Vec<u8>) {
+/// printed pixels and optionally a dashed outline of the printable area.
+pub fn preview_rgba(r: &Rendered, style: &PreviewStyle) -> (u32, u32, Vec<u8>) {
     let g = &r.geometry;
     let (w, h) = (g.label_w, g.label_h);
     let mut px = vec![0u8; (w * h * 4) as usize];
@@ -511,12 +557,10 @@ pub fn preview_rgba(r: &Rendered) -> (u32, u32, Vec<u8>) {
                 let horizontal = (near(dy, -1) || near(dy, ph)) && dx >= -1 && dx <= pw && dash(x);
                 g.kind != Kind::Round && (vertical || horizontal)
             };
-            let rgb: [u8; 3] = if ink {
-                [17, 17, 17]
-            } else if on_outline {
-                [205, 212, 220]
-            } else {
-                [255, 255, 255]
+            let rgb: [u8; 3] = match (ink, on_outline.then_some(style.outline).flatten()) {
+                (true, _) => style.ink,
+                (false, Some(outline)) => outline,
+                (false, None) => style.paper,
             };
             let i = ((y * w + x) * 4) as usize;
             px[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
@@ -525,8 +569,8 @@ pub fn preview_rgba(r: &Rendered) -> (u32, u32, Vec<u8>) {
     (w, h, px)
 }
 
-pub fn preview_png(r: &Rendered) -> Vec<u8> {
-    let (w, h, rgba) = preview_rgba(r);
+pub fn preview_png(r: &Rendered, style: &PreviewStyle) -> Vec<u8> {
+    let (w, h, rgba) = preview_rgba(r, style);
     crate::bitmap::encode_png_rgba(w, h, &rgba)
 }
 
@@ -637,6 +681,18 @@ mod tests {
         assert_eq!(out.page.height, mm_to_dots(50.0, 180) - 2 * 14);
         let (w, h) = out.geometry.label_mm();
         assert!((w - 50.0).abs() < 0.3 && (h - 24.0).abs() < 0.3, "{w} x {h}");
+    }
+
+    #[test]
+    fn bundled_font_is_the_default_and_heading_is_bigger() {
+        let mut r = Renderer::new();
+        assert_eq!(r.default_family(), BUNDLED_FONT);
+        let media = ql().media_by_key("62x29").unwrap();
+        let text = "Werkstatt\nRegal 3".to_string();
+        let plain = r.render(&Label { text: text.clone(), size_pt: Some(20.0), ..Label::default() }, ql(), media);
+        let head = r.render(&Label { text, size_pt: Some(20.0), heading: true, ..Label::default() }, ql(), media);
+        let height = |b: &Bitmap| b.ink_bounds().map(|(_, y0, _, y1)| y1 - y0).unwrap();
+        assert!(height(&head.design) > height(&plain.design), "the heading line makes the block taller");
     }
 
     #[test]

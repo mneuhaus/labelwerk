@@ -104,6 +104,9 @@ struct LabelArgs {
     qr: Option<String>,
     #[arg(long)]
     frame: bool,
+    /// First line larger and bold.
+    #[arg(long)]
+    heading: bool,
 }
 
 impl LabelArgs {
@@ -128,6 +131,7 @@ impl LabelArgs {
             qr: self.qr.is_some(),
             qr_content: self.qr.clone().unwrap_or_default(),
             frame: self.frame,
+            heading: self.heading,
         })
     }
 }
@@ -278,7 +282,7 @@ fn run(cli: &Cli) -> Result<()> {
             let (model, media) = pick_model_and_media(label.model.as_deref(), label.media.as_deref())?;
             let mut renderer = Renderer::new();
             let rendered = renderer.render(&label.label(media)?, model, media);
-            std::fs::write(out, preview_png(&rendered)).with_context(|| format!("writing {}", out.display()))?;
+            std::fs::write(out, preview_png(&rendered, &Default::default())).with_context(|| format!("writing {}", out.display()))?;
             if let Some(job_path) = job {
                 std::fs::write(job_path, encode_job(model, media, &[&rendered.page], &PrintOptions::default())?)?;
             }
