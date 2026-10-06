@@ -10,3 +10,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 png = "0.18"
+cosmic-text = "0.19"
+qrcode = { version = "0.14", default-features = false }
+nusb = "0.2"
