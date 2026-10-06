@@ -7,7 +7,7 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP=dist/Labelwerk.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp target/release/Labelwerk "$APP/Contents/MacOS/Labelwerk"
+cp target/release/labelwerk-app "$APP/Contents/MacOS/Labelwerk"
 cp target/release/labelwerk dist/labelwerk
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

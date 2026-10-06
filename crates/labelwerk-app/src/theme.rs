@@ -1,5 +1,5 @@
-//! "Werkbank" look: a cutting mat as the work surface, signal yellow for the one action that matters,
-//! Barlow (signage grotesque) for the interface and IBM Plex Mono for measurements.
+//! Look: a neutral work surface with a true-scale centimetre grid, signal yellow for the one action that
+//! matters, Barlow (signage grotesque) for the interface and IBM Plex Mono for measurements.
 
 use std::borrow::Cow;
 use std::rc::Rc;
@@ -11,12 +11,33 @@ pub const UI_FONT: &str = "Barlow";
 pub const DISPLAY_FONT: &str = "Barlow Semi Condensed";
 pub const MONO_FONT: &str = "IBM Plex Mono";
 
-/// Cutting mat, the same in light and dark mode (it is an object, not chrome).
-pub const MAT: u32 = 0x22403a;
-/// 1 cm grid and 5 cm grid on the mat, and the measurement lines drawn on it.
-pub const MAT_GRID: u32 = 0xffffff12;
-pub const MAT_GRID_MAJOR: u32 = 0xffffff26;
-pub const MAT_INK: u32 = 0xe8f0ebcc;
+/// The work surface the label lies on, with a centimetre grid at true scale.
+#[derive(Debug, Clone, Copy)]
+pub struct Canvas {
+    pub bg: u32,
+    /// 1 cm and 5 cm grid lines (RGBA)
+    pub grid: u32,
+    pub grid_major: u32,
+    /// measurements and captions drawn on the surface (RGBA)
+    pub ink: u32,
+    /// edge around the label so white paper stands out on a light surface (RGBA)
+    pub edge: u32,
+}
+
+const GRAPHITE: Canvas = Canvas { bg: 0x232529, grid: 0xffffff0f, grid_major: 0xffffff21, ink: 0xe6e8ebcc, edge: 0x00000000 };
+const DRAFTING: Canvas = Canvas { bg: 0xe8e9ec, grid: 0x0000000c, grid_major: 0x0000001a, ink: 0x2b2e33cc, edge: 0x00000024 };
+const MAT: Canvas = Canvas { bg: 0x22403a, grid: 0xffffff12, grid_major: 0xffffff26, ink: 0xe8f0ebcc, edge: 0x00000000 };
+
+/// Graphite in dark mode, drafting grey in light mode; `LABELWERK_CANVAS=graphit|hell|matte` forces one.
+pub fn canvas(dark: bool) -> Canvas {
+    match std::env::var("LABELWERK_CANVAS").as_deref() {
+        Ok("graphit") => GRAPHITE,
+        Ok("hell") => DRAFTING,
+        Ok("matte") => MAT,
+        _ if dark => GRAPHITE,
+        _ => DRAFTING,
+    }
+}
 
 pub fn load_fonts(cx: &mut App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
@@ -36,39 +57,39 @@ pub fn load_fonts(cx: &mut App) {
 
 /// (field, light, dark)
 const COLORS: &[(&str, &str, &str)] = &[
-    ("background", "#f3f4f1", "#0e1412"),
-    ("foreground", "#17201c", "#e3e9e5"),
-    ("border", "#d9ded8", "#243029"),
-    ("input", "#cfd6cf", "#2d3a33"),
-    ("muted", "#e9ece7", "#161f1b"),
-    ("muted_foreground", "#5c6a63", "#8d9b94"),
-    ("sidebar", "#f9faf8", "#111916"),
-    ("sidebar_border", "#d9ded8", "#243029"),
-    ("sidebar_foreground", "#17201c", "#e3e9e5"),
-    ("secondary", "#e9ece7", "#1a2420"),
-    ("secondary_hover", "#dfe4de", "#212d28"),
-    ("secondary_active", "#d4dbd3", "#283630"),
-    ("secondary_foreground", "#17201c", "#e3e9e5"),
-    ("accent", "#e4e9e3", "#1c2722"),
-    ("accent_foreground", "#17201c", "#e3e9e5"),
+    ("background", "#f5f5f6", "#121315"),
+    ("foreground", "#18191b", "#e7e8ea"),
+    ("border", "#e0e1e4", "#26282c"),
+    ("input", "#d6d8dc", "#30333a"),
+    ("muted", "#ececee", "#1a1c1f"),
+    ("muted_foreground", "#64676d", "#93969c"),
+    ("sidebar", "#fbfbfc", "#16171a"),
+    ("sidebar_border", "#e0e1e4", "#26282c"),
+    ("sidebar_foreground", "#18191b", "#e7e8ea"),
+    ("secondary", "#ececee", "#1f2124"),
+    ("secondary_hover", "#e3e4e7", "#26282c"),
+    ("secondary_active", "#d9dade", "#2e3035"),
+    ("secondary_foreground", "#18191b", "#e7e8ea"),
+    ("accent", "#ebecee", "#202226"),
+    ("accent_foreground", "#18191b", "#e7e8ea"),
     ("primary", "#f2c230", "#f2c230"),
     ("primary_hover", "#e7b522", "#f5cd52"),
     ("primary_active", "#d6a515", "#dcae22"),
-    ("primary_foreground", "#17201c", "#121815"),
+    ("primary_foreground", "#18191b", "#141414"),
     ("success", "#2f8a57", "#4cb57a"),
-    ("success_foreground", "#ffffff", "#0e1412"),
+    ("success_foreground", "#ffffff", "#121315"),
     ("warning", "#c98216", "#e3a43c"),
-    ("warning_foreground", "#17201c", "#0e1412"),
+    ("warning_foreground", "#18191b", "#121315"),
     ("danger", "#c63d2f", "#e3604f"),
     ("danger_foreground", "#ffffff", "#ffffff"),
-    ("ring", "#2f6b57", "#f2c230"),
-    ("selection", "#cfe3d9", "#2a4a3e"),
-    ("popover", "#ffffff", "#141c19"),
-    ("popover_foreground", "#17201c", "#e3e9e5"),
-    ("list_hover", "#e9ece7", "#1c2722"),
-    ("switch", "#cdd4cd", "#2d3a33"),
-    ("title_bar", "#f9faf8", "#111916"),
-    ("title_bar_border", "#d9ded8", "#243029"),
+    ("ring", "#18191b", "#f2c230"),
+    ("selection", "#e6e7ea", "#2a2c31"),
+    ("popover", "#ffffff", "#18191c"),
+    ("popover_foreground", "#18191b", "#e7e8ea"),
+    ("list_hover", "#ececee", "#202226"),
+    ("switch", "#d4d6da", "#33363c"),
+    ("title_bar", "#fbfbfc", "#16171a"),
+    ("title_bar_border", "#e0e1e4", "#26282c"),
 ];
 
 fn apply(config: &Rc<ThemeConfig>, dark: bool) -> Rc<ThemeConfig> {

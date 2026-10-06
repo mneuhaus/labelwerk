@@ -3,7 +3,8 @@
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
-use labelwerk_core::transport::{self, SystemQueue, UsbPrinter};
+use labelwerk_core::model::Support;
+use labelwerk_core::transport::{self, PrintEvent, Probe, SystemQueue, UsbPrinter};
 use labelwerk_core::{Bitmap, Media, Model, PrintOptions};
 
 /// One USB conversation at a time (polling and printing both claim the interface).
@@ -58,8 +59,9 @@ pub fn poll() -> PrinterState {
     let Some(device) = devices.first() else {
         return PrinterState::Missing { queue: queue() };
     };
-    match UsbPrinter::open(device).and_then(|mut p| p.request_status()) {
-        Ok(s) => {
+    match UsbPrinter::open(device).and_then(|mut p| transport::probe(&mut p)) {
+        Ok(Probe::Silent(model)) => PrinterState::Ready { model, media: None, colors: None },
+        Ok(Probe::Status(s)) => {
             let media = s.media();
             let errors = s.errors();
             match s.model() {
@@ -74,6 +76,12 @@ pub fn poll() -> PrinterState {
                     model: Some(model),
                     media,
                     message: errors.iter().map(|e| german(e)).collect::<Vec<_>>().join(", "),
+                },
+                Some(model) if model.protocol.support == Support::Unsupported => PrinterState::Problem {
+                    name: model.name.clone(),
+                    model: Some(model),
+                    media,
+                    message: "Modell wird nicht unterstützt (anderes Protokoll)".into(),
                 },
                 Some(model) if media.is_none() => PrinterState::Problem {
                     name: model.name.clone(),
@@ -91,14 +99,21 @@ pub fn poll() -> PrinterState {
     }
 }
 
-/// Print over USB, checking printer and media first. Blocking.
-pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap>, opts: PrintOptions) -> Result<()> {
+/// Print over USB, checking printer and media first. Blocking. `Ok(false)`: sent, but the model cannot confirm.
+pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap>, opts: PrintOptions) -> Result<bool> {
     let _guard = USB.lock().map_err(|_| anyhow!("USB lock poisoned"))?;
     let devices = transport::list_usb()?;
     let device = devices.first().ok_or_else(|| anyhow!("Kein Drucker an USB gefunden"))?;
     let mut printer = UsbPrinter::open(device)?;
     let refs: Vec<&Bitmap> = pages.iter().collect();
-    transport::print_usb(&mut printer, model, media, &refs, &opts, |_| {}).map_err(|e| anyhow!(german(&format!("{e:#}"))))
+    let mut confirmed = true;
+    transport::print_usb(&mut printer, model, media, &refs, &opts, |event| {
+        if event == PrintEvent::Unconfirmed {
+            confirmed = false;
+        }
+    })
+    .map_err(|e| anyhow!(german(&format!("{e:#}"))))?;
+    Ok(confirmed)
 }
 
 pub fn print_queue(
@@ -107,9 +122,10 @@ pub fn print_queue(
     media: &'static Media,
     pages: Vec<Bitmap>,
     opts: PrintOptions,
-) -> Result<()> {
+) -> Result<bool> {
     let refs: Vec<&Bitmap> = pages.iter().collect();
-    transport::print_system_queue(&queue, model, media, &refs, &opts)
+    transport::print_system_queue(&queue, model, media, &refs, &opts)?;
+    Ok(false)
 }
 
 /// The core speaks English; the app shows the printer's messages in German.

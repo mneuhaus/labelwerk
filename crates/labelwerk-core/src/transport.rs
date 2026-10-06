@@ -4,6 +4,8 @@
 //! via `nusb`. On Windows `nusb` needs the WinUSB driver; there the spooler route is the way to go.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,7 +15,7 @@ use serde::Serialize;
 
 use crate::bitmap::Bitmap;
 use crate::media::Media;
-use crate::model::Model;
+use crate::model::{Model, Support};
 use crate::protocol::{INITIALIZE, PrintOptions, STATUS_REQUEST, encode_job};
 use crate::status::{STATUS_LEN, Status, StatusType};
 
@@ -108,16 +110,7 @@ impl UsbPrinter {
 
     /// Next status block the printer sends, or `None` after `timeout`.
     pub fn read_status(&mut self, timeout: Duration) -> Result<Option<Status>> {
-        self.reader.set_read_timeout(timeout);
-        let mut buf = [0u8; STATUS_LEN];
-        match self.reader.read_exact(&mut buf) {
-            Ok(()) => {
-                trace(|| format!("status {:02x?}", buf));
-                Status::parse(&buf).map(Some)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
-            Err(e) => Err(e).context("reading printer status"),
-        }
+        read_status(&mut self.reader, timeout)
     }
 
     /// Reset the printer's receive state and ask for its status.
@@ -138,6 +131,43 @@ impl UsbPrinter {
     }
 }
 
+fn read_status(reader: &mut nusb::io::EndpointRead<Bulk>, timeout: Duration) -> Result<Option<Status>> {
+    reader.set_read_timeout(timeout);
+    let mut buf = [0u8; STATUS_LEN];
+    match reader.read_exact(&mut buf) {
+        Ok(()) => {
+            trace(|| format!("status {:02x?}", buf));
+            Status::parse(&buf).map(Some)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
+        Err(e) => Err(e).context("reading printer status"),
+    }
+}
+
+/// What we can learn about a connected printer.
+#[derive(Debug, Clone)]
+pub enum Probe {
+    Status(Status),
+    /// A model that does not answer status requests (PT-E550W, PT-P750W), known from its USB name.
+    Silent(&'static Model),
+}
+
+impl Probe {
+    pub fn model(&self) -> Option<&'static Model> {
+        match self {
+            Probe::Status(s) => s.model(),
+            Probe::Silent(m) => Some(m),
+        }
+    }
+}
+
+pub fn probe(printer: &mut UsbPrinter) -> Result<Probe> {
+    if let Some(model) = Model::by_product(&printer.device.product).filter(|m| !m.protocol.status) {
+        return Ok(Probe::Silent(model));
+    }
+    printer.request_status().map(Probe::Status)
+}
+
 /// What happens during a print, for progress display.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrintEvent {
@@ -145,9 +175,14 @@ pub enum PrintEvent {
     Printing { done: usize, total: usize },
     Cooling,
     Finished,
+    /// Sent to a printer that cannot confirm what it printed.
+    Unconfirmed,
 }
 
 /// Check the printer and media, send the job and wait until every label is out.
+///
+/// The printer's status messages are read on a second thread while the job is sent: some models report
+/// right after the raster-mode command and stop accepting data until that report is collected.
 pub fn print_usb(
     printer: &mut UsbPrinter,
     model: &Model,
@@ -156,36 +191,81 @@ pub fn print_usb(
     opts: &PrintOptions,
     mut on_event: impl FnMut(PrintEvent),
 ) -> Result<()> {
-    let status = printer.request_status()?;
-    check_ready(&status, model, media)?;
-    let job = encode_job(model, media, pages, opts)?;
-    on_event(PrintEvent::Sending);
-    printer.write_all(&job)?;
-    let total = pages.len();
-    let mut done = 0;
-    on_event(PrintEvent::Printing { done, total });
-    let mut last = Instant::now();
-    while done < total {
-        match printer.read_status(Duration::from_secs(1))? {
-            Some(s) if s.has_error() => bail!("{}", describe_errors(&s)),
-            Some(s) if s.status_type == StatusType::PrintingCompleted => {
-                done += 1;
-                last = Instant::now();
-                on_event(PrintEvent::Printing { done, total });
-            }
-            Some(s) if s.cooling() => {
-                last = Instant::now();
-                on_event(PrintEvent::Cooling);
-            }
-            Some(_) => last = Instant::now(),
-            None if last.elapsed() > Duration::from_secs(60) => {
-                bail!("the printer stopped answering ({done} of {total} labels printed)")
-            }
-            None => {}
-        }
+    if model.protocol.support == Support::Unsupported {
+        bail!("{} speaks a protocol Labelwerk does not implement", model.name);
     }
-    on_event(PrintEvent::Finished);
-    Ok(())
+    if model.protocol.status {
+        let status = printer.request_status()?;
+        check_ready(&status, model, media)?;
+    }
+    let job = encode_job(model, media, pages, opts)?;
+    let total = pages.len();
+    let (tx, rx) = mpsc::channel::<Result<Status>>();
+    let stop = AtomicBool::new(false);
+    let UsbPrinter { reader, writer, device } = printer;
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                match read_status(reader, Duration::from_millis(200)) {
+                    Ok(Some(s)) => {
+                        if tx.send(Ok(s)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        let result = (|| {
+            on_event(PrintEvent::Sending);
+            trace(|| format!("write job, {} bytes", job.len()));
+            writer.write_all(&job).context("sending to printer")?;
+            writer.flush().context("sending to printer")?;
+            trace(|| "job sent".into());
+            if !model.protocol.status {
+                // Nothing will confirm the print; only report an error the printer volunteers.
+                if let Ok(Ok(s)) = rx.recv_timeout(Duration::from_secs(2))
+                    && s.has_error()
+                {
+                    bail!("{}", describe_errors(&s));
+                }
+                on_event(PrintEvent::Unconfirmed);
+                return Ok(());
+            }
+            let mut done = 0;
+            on_event(PrintEvent::Printing { done, total });
+            let mut last = Instant::now();
+            while done < total {
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(Ok(s)) if s.has_error() => bail!("{}", describe_errors(&s)),
+                    Ok(Ok(s)) if s.status_type == StatusType::PrintingCompleted => {
+                        done += 1;
+                        last = Instant::now();
+                        on_event(PrintEvent::Printing { done, total });
+                    }
+                    Ok(Ok(s)) if s.cooling() => {
+                        last = Instant::now();
+                        on_event(PrintEvent::Cooling);
+                    }
+                    Ok(Ok(_)) => last = Instant::now(),
+                    Ok(Err(e)) => return Err(e),
+                    Err(mpsc::RecvTimeoutError::Timeout) if last.elapsed() > Duration::from_secs(60) => {
+                        bail!("the printer stopped answering ({done} of {total} labels printed)")
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => bail!("lost the connection to {}", device.product),
+                }
+            }
+            on_event(PrintEvent::Finished);
+            Ok(())
+        })();
+        stop.store(true, Ordering::Relaxed);
+        result
+    })
 }
 
 pub fn check_ready(status: &Status, model: &Model, media: &Media) -> Result<()> {

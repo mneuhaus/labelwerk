@@ -15,6 +15,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use labelwerk_core::media::dots_to_mm;
+use labelwerk_core::bitmap::encode_png_rgba;
 use labelwerk_core::render::{PreviewStyle, preview_png};
 use labelwerk_core::model::Support;
 use labelwerk_core::{Align, Direction, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
@@ -123,6 +124,10 @@ pub struct LabelApp {
     printing: bool,
     rendered: Option<Rendered>,
     preview: Option<Arc<Image>>,
+    /// Show the printer's dots instead of the smooth preview.
+    show_dots: bool,
+    /// Pixels per printer dot the smooth preview was drawn with.
+    preview_k: u32,
     /// Mini previews of `history` (image, width / height).
     thumbs: Vec<(Arc<Image>, f32)>,
     text: Entity<TextareaState>,
@@ -241,6 +246,8 @@ impl LabelApp {
             printing: false,
             rendered: None,
             preview: None,
+            show_dots: false,
+            preview_k: 0,
             thumbs: Vec::new(),
             text,
             font,
@@ -256,6 +263,13 @@ impl LabelApp {
         };
         this.rerender(window, cx);
         this.refresh_thumbs();
+        // the smooth preview is drawn for the size it is shown at
+        this._subscriptions.push(cx.observe_window_bounds(window, |this, window, cx| {
+            let wanted = this.rendered.as_ref().map(|r| preview_k(&r.geometry, window));
+            if !this.show_dots && wanted.is_some_and(|k| k != this.preview_k) {
+                this.rerender(window, cx);
+            }
+        }));
         this.start_polling(window, cx);
         this
     }
@@ -285,7 +299,15 @@ impl LabelApp {
         let rendered = self.renderer.render(&self.label, self.model, self.media);
         let look = self.look();
         let style = PreviewStyle { paper: look.tape, ink: look.ink, outline: Some(mix(look.tape, look.ink, 0.10)) };
-        self.preview = Some(Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(&rendered, &style))));
+        let png = if self.show_dots {
+            preview_png(&rendered, &style)
+        } else {
+            let k = preview_k(&rendered.geometry, window);
+            self.preview_k = k;
+            let (w, h, rgba) = self.renderer.preview_smooth(&rendered, k, &style);
+            encode_png_rgba(w, h, &rgba)
+        };
+        self.preview = Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
         let auto = |v: Option<f32>, unit: &str| v.map(|v| format!("Auto ({} {unit})", mm(v))).unwrap_or_else(|| "Auto".into());
         let size_hint = auto(rendered.font_pt, "pt");
         let length_hint = auto(Some(dots_to_mm(rendered.geometry.along_dots(), rendered.geometry.dpi)), "mm");
@@ -424,6 +446,9 @@ impl LabelApp {
         if empty {
             return Some("Das Etikett ist leer".into());
         }
+        if self.model.protocol.support == Support::Unsupported {
+            return Some(format!("{} spricht ein anderes Protokoll und wird nicht unterstützt", self.model.name));
+        }
         match &self.printer {
             PrinterState::Searching => Some("Suche Drucker …".into()),
             PrinterState::Missing { .. } => Some(format!("{} per USB anschließen und einschalten", self.model.name)),
@@ -471,12 +496,13 @@ impl LabelApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.printing = false;
                 match result {
-                    Ok(()) => {
+                    Ok(confirmed) => {
                         store::remember(&mut this.history, entry);
                         this.refresh_thumbs();
                         store::save(&this.saved());
                         let what = if copies == 1 { "1 Etikett".to_string() } else { format!("{copies} Etiketten") };
-                        window.push_notification(Notification::success(format!("{what} auf {}", media_name(media))).title("Gedruckt"), cx);
+                        let title = if confirmed { "Gedruckt" } else { "Gesendet" };
+                        window.push_notification(Notification::success(format!("{what} auf {}", media_name(media))).title(title), cx);
                     }
                     Err(e) => {
                         window.push_notification(Notification::error(printer::german(&format!("{e:#}"))).title("Druck fehlgeschlagen"), cx);
@@ -523,7 +549,7 @@ impl LabelApp {
             PrinterState::Searching => (theme.muted_foreground, "Suche Drucker".into(), None),
             PrinterState::Missing { .. } => (theme.muted_foreground, "Kein Drucker".into(), None),
             PrinterState::Ready { model, media, .. } => {
-                (theme.success, model.name.clone(), media.map(|m| media_short(m)))
+                (theme.success, model.name.clone(), media.map(media_short))
             }
             PrinterState::Problem { name, message, .. } => (theme.danger, name.clone(), Some(message.clone())),
             PrinterState::Busy { product, .. } => (theme.warning, product.clone(), Some("belegt".into())),
@@ -678,6 +704,7 @@ impl LabelApp {
             Support::Verified => None,
             Support::Documented => Some("Nach Brothers Befehlsreferenz umgesetzt"),
             Support::Assumed => Some("Ungetestet, abgeleitet aus verwandten Modellen"),
+            Support::Unsupported => Some("Nicht unterstützt: anderes Druckprotokoll"),
         };
         let tape = v_flex()
             .gap_2()
@@ -731,15 +758,16 @@ impl LabelApp {
 
     fn render_mat(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let mat_ink = rgba(theme::MAT_INK);
-        let Some(r) = &self.rendered else { return div().flex_1().bg(rgb(theme::MAT)) };
+        let surface = theme::canvas(theme.is_dark());
+        let mat_ink = rgba(surface.ink);
+        let Some(r) = &self.rendered else { return div().flex_1().bg(rgb(surface.bg)) };
         let g = r.geometry;
         let look = self.look();
         let view = window.viewport_size();
         let mat_w = (f32::from(view.width) - INSPECTOR_W).max(200.);
         let mat_h = (f32::from(view.height) - TITLE_H - BAR_H).max(200.);
         let (w_mm, h_mm) = g.label_mm();
-        let s = ((mat_w - 260.) / w_mm).min((mat_h - 220.) / h_mm).clamp(0.5, MAX_PT_PER_MM);
+        let s = mat_scale(view, w_mm, h_mm);
         let (lw, lh) = (w_mm * s, h_mm * s);
         let (left, top) = ((mat_w - lw) / 2., (mat_h - lh) / 2.);
         // the tape runs along the feed: horizontally when the text runs along it
@@ -761,7 +789,7 @@ impl LabelApp {
                         continue;
                     }
                     let x = x0 + i as f32 * step;
-                    let color = if i % major == 0 { theme::MAT_GRID_MAJOR } else { theme::MAT_GRID };
+                    let color = if i % major == 0 { surface.grid_major } else { surface.grid };
                     window.paint_quad(fill(Bounds::new(point(px(x), px(by)), size(px(1.), px(bh))), rgba(color)));
                 }
                 for j in first(y0, by)..=first(y0, by + bh) + 1 {
@@ -769,7 +797,7 @@ impl LabelApp {
                         continue;
                     }
                     let y = y0 + j as f32 * step;
-                    let color = if j % major == 0 { theme::MAT_GRID_MAJOR } else { theme::MAT_GRID };
+                    let color = if j % major == 0 { surface.grid_major } else { surface.grid };
                     window.paint_quad(fill(Bounds::new(point(px(bx), px(y)), size(px(bw), px(1.))), rgba(color)));
                 }
             },
@@ -831,7 +859,7 @@ impl LabelApp {
                     .absolute()
                     .size_full()
                     .justify_center()
-                    .child(div().px_2().bg(rgb(theme::MAT)).child(mono(format!("{} mm", mm(w_mm))))),
+                    .child(div().px_2().bg(rgb(surface.bg)).child(mono(format!("{} mm", mm(w_mm))))),
             );
         let v_dim = div()
             .absolute()
@@ -857,6 +885,8 @@ impl LabelApp {
             .w(px(lw))
             .h(px(lh))
             .shadow_lg()
+            .border_1()
+            .border_color(rgba(surface.edge))
             .when(g.kind == Kind::Round, |d| d.rounded_full())
             .when(g.kind == Kind::DieCut, |d| d.rounded(px(1.5 * s)))
             .when_some(self.preview.clone(), |d, p| d.child(img(p).size_full()));
@@ -879,7 +909,7 @@ impl LabelApp {
             .min_w_0()
             .relative()
             .overflow_hidden()
-            .bg(rgb(theme::MAT))
+            .bg(rgb(surface.bg))
             .child(grid)
             .child(strip(true))
             .child(strip(false))
@@ -896,7 +926,19 @@ impl LabelApp {
                     .child(div().text_xs().text_color(mat_ink.opacity(0.7)).child(detail.join("  ·  "))),
             )
             .child(
-                h_flex().absolute().top(px(12.)).right(px(14.)).child(
+                h_flex().absolute().top(px(12.)).right(px(14.)).gap_1().child(
+                    Button::new("dots")
+                        .small()
+                        .ghost()
+                        .selected(self.show_dots)
+                        .icon(Icon::new(IconName::Grid3x3).text_color(mat_ink))
+                        .child(div().text_color(mat_ink).child("Druckpunkte"))
+                        .tooltip("Die einzelnen Punkte zeigen, die der Drucker setzt")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_dots = !this.show_dots;
+                            this.rerender(window, cx);
+                        })),
+                ).child(
                     Button::new("rotate")
                         .small()
                         .ghost()
@@ -1005,6 +1047,21 @@ impl LabelApp {
                     .on_click(cx.listener(|this, _, window, cx| this.print(window, cx))),
             )
     }
+}
+
+/// Pixels per printer dot for the smooth preview: as many as the screen shows, so text edges stay smooth.
+fn preview_k(g: &labelwerk_core::render::Geometry, window: &Window) -> u32 {
+    let (w_mm, h_mm) = g.label_mm();
+    let screen_px_per_mm = mat_scale(window.viewport_size(), w_mm, h_mm) * window.scale_factor();
+    let max_k = ((6_000_000.0 / (g.label_w * g.label_h).max(1) as f32).sqrt() as u32).max(1);
+    ((screen_px_per_mm * 25.4 / g.dpi as f32).ceil() as u32).clamp(1, 8).min(max_k)
+}
+
+/// Screen points per millimetre for a label on the mat of a window of this size.
+fn mat_scale(view: Size<Pixels>, w_mm: f32, h_mm: f32) -> f32 {
+    let mat_w = (f32::from(view.width) - INSPECTOR_W).max(200.);
+    let mat_h = (f32::from(view.height) - TITLE_H - BAR_H).max(200.);
+    ((mat_w - 260.) / w_mm).min((mat_h - 220.) / h_mm).clamp(0.5, MAX_PT_PER_MM)
 }
 
 fn german_warning(w: &str) -> String {

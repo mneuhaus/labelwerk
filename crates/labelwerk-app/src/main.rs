@@ -20,7 +20,7 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Printer, RotateCw, Bold, Italic, RefreshCw, TextAlignStart, TextAlignCenter, TextAlignEnd, Tag, LoaderCircle,
-        Unplug, CircleAlert, CircleCheck, Heading, QrCode, Square, Info
+        Unplug, CircleAlert, CircleCheck, Heading, QrCode, Square, Info, Grid3x3
     ]
 );
 

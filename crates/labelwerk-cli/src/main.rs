@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use labelwerk_core::protocol::{decode_job, lines_to_bitmap};
 use labelwerk_core::render::preview_png;
-use labelwerk_core::transport::{self, PrintEvent, UsbPrinter};
+use labelwerk_core::transport::{self, PrintEvent, Probe, UsbPrinter};
 use labelwerk_core::{Align, Direction, Label, Media, Model, PrintOptions, Renderer, encode_job, models};
 
 #[derive(Parser)]
@@ -172,34 +172,34 @@ fn model_by_name(name: &str) -> Result<&'static Model> {
     Model::by_name(name).ok_or_else(|| anyhow!("unknown model {name:?}, see `labelwerk models`"))
 }
 
-/// Status of the first printer on USB, if any answers.
-fn connected_status() -> Option<labelwerk_core::Status> {
+/// What the first printer on USB tells about itself, if anything.
+fn connected() -> Option<Probe> {
     let device = transport::list_usb().ok()?.into_iter().next()?;
-    UsbPrinter::open(&device).and_then(|mut p| p.request_status()).ok()
+    UsbPrinter::open(&device).and_then(|mut p| transport::probe(&mut p)).ok()
 }
 
 /// The model to work with: named, or the connected printer's, or the QL-1100.
 fn pick_model(name: Option<&str>) -> Result<&'static Model> {
     match name {
         Some(name) => model_by_name(name),
-        None => Ok(connected_status().and_then(|s| s.model()).unwrap_or_else(Model::default_model)),
+        None => Ok(connected().and_then(|p| p.model()).unwrap_or_else(Model::default_model)),
     }
 }
 
 /// Model and media for rendering: as named, else what the connected printer has loaded.
 fn pick_model_and_media(model: Option<&str>, media: Option<&str>) -> Result<(&'static Model, &'static Media)> {
-    let status = if model.is_none() || media.is_none() { connected_status() } else { None };
+    let probe = if model.is_none() || media.is_none() { connected() } else { None };
     let model = match model {
         Some(name) => model_by_name(name)?,
-        None => status.as_ref().and_then(|s| s.model()).unwrap_or_else(Model::default_model),
+        None => probe.as_ref().and_then(|p| p.model()).unwrap_or_else(Model::default_model),
     };
     let media = match media {
         Some(key) => media_by_key(model, key)?,
-        None => status
-            .as_ref()
-            .filter(|s| s.model().is_some_and(|m| m.name == model.name))
-            .and_then(|s| s.media())
-            .unwrap_or(&model.media[0]),
+        None => match &probe {
+            Some(Probe::Status(s)) if s.model().is_some_and(|m| m.name == model.name) => s.media(),
+            _ => None,
+        }
+        .unwrap_or(&model.media[0]),
     };
     Ok((model, media))
 }
@@ -245,15 +245,15 @@ fn run(cli: &Cli) -> Result<()> {
             let usb = transport::list_usb()?;
             let mut printers = Vec::new();
             for d in &usb {
-                let status = UsbPrinter::open(d).and_then(|mut p| p.request_status());
-                printers.push((d, status));
+                printers.push((d, UsbPrinter::open(d).and_then(|mut p| transport::probe(&mut p))));
             }
             let queues = transport::list_system_queues();
             if cli.json {
                 let list: Vec<_> = printers
                     .iter()
                     .map(|(d, s)| match s {
-                        Ok(s) => serde_json::json!({ "device": d, "model": s.model_name(), "known": s.is_supported_model(), "media": s.media().map(|m| m.key()), "errors": s.errors() }),
+                        Ok(Probe::Status(s)) => serde_json::json!({ "device": d, "model": s.model_name(), "known": s.is_supported_model(), "media": s.media().map(|m| m.key()), "errors": s.errors() }),
+                        Ok(Probe::Silent(m)) => serde_json::json!({ "device": d, "model": m.name, "known": true, "media": null, "errors": [], "note": "this model cannot report its status" }),
                         Err(e) => serde_json::json!({ "device": d, "error": format!("{e:#}") }),
                     })
                     .collect();
@@ -264,7 +264,8 @@ fn run(cli: &Cli) -> Result<()> {
                 }
                 for (d, s) in &printers {
                     match s {
-                        Ok(s) => {
+                        Ok(Probe::Silent(m)) => println!("{} (USB {}): connected, cannot report its tape", m.name, d.serial.as_deref().unwrap_or("-")),
+                        Ok(Probe::Status(s)) => {
                             let media = s.media().map(|m| m.label()).unwrap_or_else(|| "no known media".into());
                             let errors = s.errors();
                             let state = if errors.is_empty() { "ready".to_string() } else { errors.join(", ") };
@@ -319,13 +320,20 @@ fn run(cli: &Cli) -> Result<()> {
                 return Ok(());
             }
             let mut printer = open_printer()?;
-            let status = printer.request_status()?;
-            let model = status.model().ok_or_else(|| NotReady(format!("{} is not a known QL or PT model", status.model_name())))?;
-            let media = match &label.media {
-                Some(key) => media_by_key(model, key)?,
-                None => status.media().ok_or_else(|| NotReady("the printer reports no known media".into()))?,
+            let probe = transport::probe(&mut printer)?;
+            let model = match &probe {
+                Probe::Status(s) => s.model().ok_or_else(|| NotReady(format!("{} is not a known QL or PT model", s.model_name())))?,
+                Probe::Silent(m) => m,
             };
-            transport::check_ready(&status, model, media).map_err(|e| NotReady(format!("{e:#}")))?;
+            let media = match (&label.media, &probe) {
+                (Some(key), _) => media_by_key(model, key)?,
+                (None, Probe::Status(s)) => s.media().ok_or_else(|| NotReady("the printer reports no known media".into()))?,
+                (None, Probe::Silent(m)) => return Err(NotReady(format!("{} cannot report its tape, pass --media", m.name)).into()),
+            };
+            if let Probe::Status(status) = &probe {
+                transport::check_ready(status, model, media).map_err(|e| NotReady(format!("{e:#}")))?;
+            }
+            let mut confirmed = true;
             let rendered = renderer.render(&label.label(media)?, model, media);
             for w in &rendered.warnings {
                 eprintln!("warning: {w}");
@@ -339,8 +347,12 @@ fn run(cli: &Cli) -> Result<()> {
                         _ => {}
                     }
                 }
+                if event == PrintEvent::Unconfirmed {
+                    confirmed = false;
+                }
             })?;
-            report(cli, &format!("printed {copies} label(s) on {} {}", model.name, media.label()));
+            let verb = if confirmed { "printed" } else { "sent (the printer cannot confirm)" };
+            report(cli, &format!("{verb} {copies} label(s) on {} {}", model.name, media.label()));
         }
         Command::Decode { job, model, media, out } => {
             let model = model_by_name(model)?;

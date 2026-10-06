@@ -198,6 +198,43 @@ pub struct Rendered {
     pub font_pt: Option<f32>,
     /// Problems the user should see, e.g. text that does not fit.
     pub warnings: Vec<String>,
+    plan: Plan,
+}
+
+/// Everything placed on the printable area, in printer dots, ready to be drawn at any integer scale: once
+/// at scale 1 for the printer, and larger for a smooth on-screen preview with the very same layout.
+#[derive(Debug, Clone)]
+struct Plan {
+    w: u32,
+    h: u32,
+    round: bool,
+    text: Option<TextPlan>,
+    qr: Option<QrPlan>,
+    /// (padding, line width) of the frame
+    frame: Option<(u32, u32)>,
+}
+
+#[derive(Debug, Clone)]
+struct TextPlan {
+    text: String,
+    family: String,
+    bold: bool,
+    italic: bool,
+    heading: bool,
+    align: Align,
+    px: f32,
+    x: f32,
+    y: f32,
+    block_w: f32,
+}
+
+#[derive(Debug, Clone)]
+struct QrPlan {
+    x: u32,
+    y: u32,
+    module: u32,
+    n: u32,
+    dark: Vec<bool>,
 }
 
 /// Font attributes plus the label's line structure.
@@ -341,7 +378,7 @@ impl Renderer {
         };
         let geometry = Geometry::new(media, direction, lines, feed);
         let (w, h) = (geometry.print_w, geometry.print_h);
-        let mut cov = vec![0u8; (w * h) as usize];
+        let mut plan = Plan { w, h, round: media.kind == Kind::Round, text: None, qr: None, frame: None };
 
         // Content box; round labels use the square inside the circle.
         let (mut bx, mut by, mut bw, mut bh) = (inset, inset, w.saturating_sub(2 * inset), h.saturating_sub(2 * inset));
@@ -364,13 +401,8 @@ impl Renderer {
                 let size = module * n;
                 let qx = if text.is_empty() { bx + (bw - size) / 2 } else { bx };
                 let qy = by + (bh - size) / 2;
-                let colors = code.to_colors();
-                for (i, c) in colors.iter().enumerate() {
-                    if *c == qrcode::Color::Dark {
-                        let (mx, my) = (i as u32 % n, i as u32 / n);
-                        fill(&mut cov, w, qx + mx * module, qy + my * module, module, module);
-                    }
-                }
+                let dark = code.to_colors().iter().map(|c| *c == qrcode::Color::Dark).collect();
+                plan.qr = Some(QrPlan { x: qx, y: qy, module, n, dark });
                 if !text.is_empty() {
                     let used = size + gap;
                     bx += used;
@@ -414,14 +446,60 @@ impl Renderer {
                 Align::Right => bx as f32 + bwf - size.0,
             };
             let ty = by as f32 + (bhf - size.1) / 2.0;
-            self.draw_text(text, &style, px, label.align, size.0, &mut cov, w, h, tx.round() as i32, ty.round() as i32);
+            plan.text = Some(TextPlan {
+                text: text.to_string(),
+                family: family.clone(),
+                bold: label.bold,
+                italic: label.italic,
+                heading: style.heading,
+                align: label.align,
+                px,
+                x: tx,
+                y: ty,
+                block_w: size.0,
+            });
+        }
+        if label.frame {
+            plan.frame = Some((pad, frame_dots));
         }
 
-        if label.frame {
-            if media.kind == Kind::Round {
-                ring(&mut cov, w, h, frame_dots);
+        let cov = self.draw(&plan, 1);
+        let design = Bitmap::from_coverage(w, h, &cov, COVERAGE_THRESHOLD);
+        let page = match direction {
+            Direction::Along => design.rotate_cw(),
+            Direction::Across => design.clone(),
+        };
+        Rendered { design, page, geometry, font_pt, warnings, plan }
+    }
+
+    /// Antialiased coverage of the printable area at `k` pixels per printer dot.
+    fn draw(&mut self, plan: &Plan, k: u32) -> Vec<u8> {
+        let (w, h) = (plan.w * k, plan.h * k);
+        let mut cov = vec![0u8; (w * h) as usize];
+        if let Some(q) = &plan.qr {
+            for (i, &dark) in q.dark.iter().enumerate() {
+                if dark {
+                    let (mx, my) = (i as u32 % q.n, i as u32 / q.n);
+                    let m = q.module * k;
+                    fill(&mut cov, w, (q.x + mx * q.module) * k, (q.y + my * q.module) * k, m, m);
+                }
+            }
+        }
+        if let Some(t) = &plan.text {
+            let attrs = Attrs::new()
+                .family(Family::Name(&t.family))
+                .weight(if t.bold { Weight::BOLD } else { Weight::NORMAL })
+                .style(if t.italic { Style::Italic } else { Style::Normal });
+            let style = TextStyle { attrs, heading: t.heading };
+            let kf = k as f32;
+            let (ox, oy) = ((t.x * kf).round() as i32, (t.y * kf).round() as i32);
+            self.draw_text(&t.text, &style, t.px * kf, t.align, t.block_w * kf, &mut cov, w, h, ox, oy);
+        }
+        if let Some((pad, line)) = plan.frame {
+            if plan.round {
+                ring(&mut cov, w, h, line * k);
             } else {
-                let (p, f) = (pad, frame_dots);
+                let (p, f) = (pad * k, line * k);
                 let (fw, fh) = (w.saturating_sub(2 * p), h.saturating_sub(2 * p));
                 fill(&mut cov, w, p, p, fw, f);
                 fill(&mut cov, w, p, (p + fh).saturating_sub(f), fw, f);
@@ -429,16 +507,19 @@ impl Renderer {
                 fill(&mut cov, w, (p + fw).saturating_sub(f), p, f, fh);
             }
         }
-
-        let mut design = Bitmap::from_coverage(w, h, &cov, COVERAGE_THRESHOLD);
-        if media.kind == Kind::Round {
-            mask_circle(&mut design);
+        if plan.round {
+            mask_circle(&mut cov, w, h);
         }
-        let page = match direction {
-            Direction::Along => design.rotate_cw(),
-            Direction::Across => design.clone(),
-        };
-        Rendered { design, page, geometry, font_pt, warnings }
+        cov
+    }
+
+    /// The whole label as RGBA for the screen: same layout as the print, but drawn antialiased at `k` pixels
+    /// per printer dot instead of the printer's black-and-white dots.
+    pub fn preview_smooth(&mut self, r: &Rendered, k: u32, style: &PreviewStyle) -> (u32, u32, Vec<u8>) {
+        let k = k.max(1);
+        let cov = self.draw(&r.plan, k);
+        let pw = r.plan.w * k;
+        compose(&r.geometry, k, style, |x, y| cov[(y * pw + x) as usize])
     }
 
     fn buffer(&mut self, text: &str, style: &TextStyle, px: f32, align: Align, width: Option<f32>) -> Buffer {
@@ -519,11 +600,17 @@ impl Default for PreviewStyle {
 /// The whole label as RGBA at printer resolution: paper in its real shape (transparent around it), the
 /// printed pixels and optionally a dashed outline of the printable area.
 pub fn preview_rgba(r: &Rendered, style: &PreviewStyle) -> (u32, u32, Vec<u8>) {
-    let g = &r.geometry;
-    let (w, h) = (g.label_w, g.label_h);
+    compose(&r.geometry, 1, style, |x, y| if r.design.get(x, y) { 255 } else { 0 })
+}
+
+/// Paint the label shape at `k` pixels per dot and blend the print in, `ink(x, y)` being the print's
+/// coverage at a pixel of the (scaled) printable area.
+fn compose(g: &Geometry, k: u32, style: &PreviewStyle, ink: impl Fn(u32, u32) -> u8) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (g.label_w * k, g.label_h * k);
+    let (print_x, print_y, print_w, print_h) = (g.print_x * k, g.print_y * k, g.print_w * k, g.print_h * k);
     let mut px = vec![0u8; (w * h * 4) as usize];
     let corner = match g.kind {
-        Kind::DieCut => mm_to_dots(1.5, g.dpi) as f32,
+        Kind::DieCut => (mm_to_dots(1.5, g.dpi) * k) as f32,
         _ => 0.0,
     };
     let inside = |x: u32, y: u32| -> bool {
@@ -541,29 +628,30 @@ pub fn preview_rgba(r: &Rendered, style: &PreviewStyle) -> (u32, u32, Vec<u8>) {
             Kind::Continuous => true,
         }
     };
-    let dash = |i: u32| (i / 12).is_multiple_of(2);
+    let dash = |i: u32| (i / (12 * k)).is_multiple_of(2);
+    let line = k as i64;
     for y in 0..h {
         for x in 0..w {
             if !inside(x, y) {
                 continue;
             }
-            let (dx, dy) = (x as i64 - g.print_x as i64, y as i64 - g.print_y as i64);
-            let in_print = dx >= 0 && dy >= 0 && dx < g.print_w as i64 && dy < g.print_h as i64;
-            let ink = in_print && r.design.get(dx as u32, dy as u32);
+            let (dx, dy) = (x as i64 - print_x as i64, y as i64 - print_y as i64);
+            let (pw, ph) = (print_w as i64, print_h as i64);
+            let in_print = dx >= 0 && dy >= 0 && dx < pw && dy < ph;
             let on_outline = {
-                let near = |a: i64, edge: i64| (a - edge).abs() <= 1;
-                let (pw, ph) = (g.print_w as i64, g.print_h as i64);
-                let vertical = (near(dx, -1) || near(dx, pw)) && dy >= -1 && dy <= ph && dash(y);
-                let horizontal = (near(dy, -1) || near(dy, ph)) && dx >= -1 && dx <= pw && dash(x);
+                let near = |a: i64, edge: i64| (a - edge).abs() <= line;
+                let vertical = (near(dx, -line) || near(dx, pw)) && dy >= -line && dy <= ph && dash(y);
+                let horizontal = (near(dy, -line) || near(dy, ph)) && dx >= -line && dx <= pw && dash(x);
                 g.kind != Kind::Round && (vertical || horizontal)
             };
-            let rgb: [u8; 3] = match (ink, on_outline.then_some(style.outline).flatten()) {
-                (true, _) => style.ink,
-                (false, Some(outline)) => outline,
-                (false, None) => style.paper,
+            let base = match on_outline.then_some(style.outline).flatten() {
+                Some(outline) => outline,
+                None => style.paper,
             };
+            let a = if in_print { ink(dx as u32, dy as u32) as u32 } else { 0 };
+            let mix = |p: u8, i: u8| ((p as u32 * (255 - a) + i as u32 * a) / 255) as u8;
             let i = ((y * w + x) * 4) as usize;
-            px[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            px[i..i + 4].copy_from_slice(&[mix(base[0], style.ink[0]), mix(base[1], style.ink[1]), mix(base[2], style.ink[2]), 255]);
         }
     }
     (w, h, px)
@@ -598,13 +686,13 @@ fn ring(cov: &mut [u8], w: u32, h: u32, thickness: u32) {
 }
 
 /// Clear everything outside the circle inscribed in the printable square.
-fn mask_circle(b: &mut Bitmap) {
-    let (cx, cy) = (b.width as f32 / 2.0, b.height as f32 / 2.0);
-    let r = b.width.min(b.height) as f32 / 2.0;
-    for y in 0..b.height {
-        for x in 0..b.width {
+fn mask_circle(cov: &mut [u8], w: u32, h: u32) {
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let r = w.min(h) as f32 / 2.0;
+    for y in 0..h {
+        for x in 0..w {
             if (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2) > r * r {
-                b.set(x, y, false);
+                cov[(y * w + x) as usize] = 0;
             }
         }
     }
@@ -693,6 +781,23 @@ mod tests {
         let head = r.render(&Label { text, size_pt: Some(20.0), heading: true, ..Label::default() }, ql(), media);
         let height = |b: &Bitmap| b.ink_bounds().map(|(_, y0, _, y1)| y1 - y0).unwrap();
         assert!(height(&head.design) > height(&plain.design), "the heading line makes the block taller");
+    }
+
+    #[test]
+    fn smooth_preview_has_the_print_layout() {
+        let mut r = Renderer::new();
+        let media = pt().media_by_key("24").unwrap();
+        let out = r.render(&Label { text: "Hallo".into(), ..Label::default() }, pt(), media);
+        let (w, h, rgba) = r.preview_smooth(&out, 4, &PreviewStyle::default());
+        assert_eq!((w, h), (out.geometry.label_w * 4, out.geometry.label_h * 4));
+        // where the print has ink, the smooth preview is dark too (same layout, finer edges)
+        let g = out.geometry;
+        let dark = |x: u32, y: u32| rgba[((y * w + x) * 4) as usize] < 128;
+        let print_dark = (0..out.design.height).flat_map(|y| (0..out.design.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| out.design.get(x, y))
+            .filter(|&(x, y)| dark((g.print_x + x) * 4 + 2, (g.print_y + y) * 4 + 2))
+            .count();
+        assert!(print_dark as f32 > 0.85 * out.design.black_pixels() as f32, "layouts differ");
     }
 
     #[test]

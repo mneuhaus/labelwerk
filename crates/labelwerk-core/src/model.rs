@@ -34,8 +34,21 @@ pub enum Support {
     Verified,
     /// Implemented from Brother's Raster Command Reference for this model, not yet printed.
     Documented,
-    /// Same family and print head as documented models, but no reference for this exact model.
+    /// No reference for this model; protocol from its family and open-source drivers.
     Assumed,
+    /// Speaks another protocol (or none we know); printing is refused.
+    Unsupported,
+}
+
+/// Command that switches the printer into raster mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeCommand {
+    /// `ESC i a 01`
+    DynamicMode,
+    /// `ESC i R 01`, older PT models (as ptouch-print sends it)
+    GraphicsMode,
+    /// The printer only knows raster mode.
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,12 +56,25 @@ pub struct Protocol {
     /// Zero bytes sent first to flush a half-received job.
     pub invalidate: usize,
     pub raster: RasterCommand,
-    /// TIFF/PackBits compression (`M 0x02`).
-    pub compression: bool,
+    pub mode: ModeCommand,
+    /// Answers the status request `ESC i S`.
+    pub status: bool,
+    /// Print information command `ESC i z`, and the bits of its valid flag (n1).
+    pub info: bool,
+    pub info_flags: u8,
+    /// n9 of `ESC i z` is 2 on the last page (PT-P900 family and the PT-D460BT group).
+    pub last_page_flag: bool,
+    /// Has an automatic cutter (`ESC i M` bit 6).
+    pub cutter: bool,
     /// `ESC i A n` (cut every n labels).
     pub cut_every: bool,
-    /// Bits of the print information command's valid flag (`ESC i z` n1).
-    pub info_flags: u8,
+    /// `ESC i K` expanded/advanced mode.
+    pub expanded: bool,
+    /// TIFF/PackBits compression (`M 0x02`) over USB.
+    pub compression: bool,
+    /// PT-D410/D460BT/D610BT/E310BT/E560BT: `ESC i d 01 00 4D 00` instead of margin and compression, and no
+    /// `ESC i K` (ptouch-print; Brother publishes no reference for these).
+    pub d460bt_magic: bool,
     pub support: Support,
 }
 
@@ -73,44 +99,87 @@ pub struct Model {
 }
 
 fn placeholder_protocol() -> Protocol {
-    Protocol {
-        invalidate: 200,
-        raster: RasterCommand::Lower,
-        compression: true,
-        cut_every: true,
-        info_flags: 0x8E,
-        support: Support::Assumed,
-    }
+    protocol_for("", Family::Ql)
 }
 
-/// Dialect per model, from the Raster Command References (see `research/protocol-table.md`).
+/// Dialect per model, from Brother's Raster Command References and, where Brother published none, from
+/// ptouch-print and brother_ql. Sources per model in `research/protocol-table.md`.
 fn protocol_for(name: &str, family: Family) -> Protocol {
-    let ql = |invalidate, support| Protocol {
-        invalidate,
+    use ModeCommand::*;
+    use Support::*;
+    let ql = Protocol {
+        invalidate: 200,
         raster: RasterCommand::Lower,
-        compression: true,
-        cut_every: true,
+        mode: DynamicMode,
+        status: true,
+        info: true,
         // printer recovery, media type, width, length
         info_flags: 0x8E,
-        support,
-    };
-    // PT: Brother's own drivers only validate the tape width (n1 = 0x84), so a non-laminated tape of the
-    // right width is not rejected as "wrong media".
-    let pt = |cut_every, support| Protocol {
-        invalidate: 100,
-        raster: RasterCommand::Upper,
+        last_page_flag: false,
+        cutter: true,
+        cut_every: true,
+        expanded: true,
         compression: true,
-        cut_every,
-        info_flags: 0x84,
-        support,
+        d460bt_magic: false,
+        support: Documented,
     };
+    // PT: Brother's drivers validate only the tape width (n1 = 0x84), so a non-laminated tape of the right
+    // width is not rejected as "wrong media".
+    let pt = Protocol { invalidate: 100, raster: RasterCommand::Upper, info_flags: 0x84, ..ql };
+    // QL generation of 2011 (Raster Command Reference "QL series" v6.00): no ESC i A
+    let ql_legacy = Protocol { cut_every: false, ..ql };
+    let d460bt = Protocol {
+        mode: DynamicMode,
+        last_page_flag: true,
+        compression: false,
+        expanded: false,
+        cut_every: false,
+        d460bt_magic: true,
+        support: Assumed,
+        ..pt
+    };
+    let p900 = Protocol { invalidate: 200, last_page_flag: true, ..pt };
     match name {
-        "QL-1100" | "QL-1110NWB" | "QL-1115NWB" => ql(400, Support::Verified),
-        "PT-P710BT" => pt(false, Support::Documented),
-        "PT-E550W" | "PT-P750W" => pt(true, Support::Documented),
+        "QL-1100" => Protocol { invalidate: 400, support: Verified, ..ql },
+        "QL-1110NWB" | "QL-1115NWB" => Protocol { invalidate: 400, ..ql },
+        "QL-800" => Protocol { invalidate: 400, compression: false, ..ql },
+        "QL-810W" | "QL-820NWB" => Protocol { invalidate: 400, ..ql },
+        "QL-710W" | "QL-720NW" => ql,
+        "QL-600" => Protocol { compression: false, ..ql },
+        "QL-500" => Protocol { mode: None, compression: false, expanded: false, cutter: false, ..ql_legacy },
+        "QL-550" => Protocol { mode: None, compression: false, expanded: false, ..ql_legacy },
+        "QL-560" | "QL-570" | "QL-700" => Protocol { mode: None, compression: false, ..ql_legacy },
+        // compression only over the serial port
+        "QL-650TD" => Protocol { compression: false, ..ql_legacy },
+        "QL-580N" | "QL-1060N" => ql_legacy,
+        "QL-1050" => Protocol { invalidate: 350, ..ql_legacy },
+        "PT-P710BT" => Protocol { cut_every: false, ..pt },
+        "PT-E550W" | "PT-P750W" => Protocol { status: false, ..pt },
+        "PT-H500" | "PT-P700" | "PT-E500" => Protocol { cut_every: false, ..pt },
+        "PT-P900" | "PT-P900W" | "PT-P950NW" => p900,
+        "PT-P910BT" => Protocol { expanded: false, ..p900 },
+        "PT-D410" | "PT-D460BT" | "PT-D610BT" | "PT-E310BT" | "PT-E560BT" => d460bt,
+        "PT-D450" => Protocol { compression: false, cut_every: false, support: Assumed, ..pt },
+        "PT-2430PC" | "PT-2700" | "PT-2730" => Protocol {
+            mode: GraphicsMode,
+            info: false,
+            compression: false,
+            cut_every: false,
+            expanded: false,
+            support: Assumed,
+            ..pt
+        },
+        "PT-P300BT" => Protocol { invalidate: 64, cut_every: false, support: Assumed, ..pt },
+        // a different raster dialect (ESC i R, ESC i c) or no raster mode at all
+        "PT-9500PC" | "PT-9600" | "PT-9700PC" | "PT-9800PCN" | "PT-3600" | "PT-18NR" | "PT-18R" | "PT-N25BT" => {
+            Protocol { support: Unsupported, ..pt }
+        }
         _ => match family {
-            Family::Ql => ql(200, Support::Assumed),
-            Family::Pt => pt(true, Support::Assumed),
+            Family::Ql => Protocol { support: Assumed, ..ql },
+            Family::Pt if name.starts_with("PT-E9") || name.starts_with("PT-E8") || name.starts_with("PT-D8") => {
+                Protocol { support: Assumed, ..p900 }
+            }
+            Family::Pt => Protocol { cut_every: false, support: Assumed, ..pt },
         },
     }
 }
@@ -155,6 +224,11 @@ impl Model {
         models().iter().find(|m| m.name.to_ascii_uppercase() == name)
     }
 
+    /// The model named in a USB product string ("PT-P750W"), for printers that do not answer `ESC i S`.
+    pub fn by_product(product: &str) -> Option<&'static Model> {
+        models().iter().find(|m| product.split_whitespace().any(|w| w.eq_ignore_ascii_case(&m.name)))
+    }
+
     /// The model behind a status reply (bytes 3 and 4).
     pub fn by_codes(series_code: u8, model_code: u8) -> Option<&'static Model> {
         models().iter().find(|m| m.series_code == series_code && m.model_code == model_code)
@@ -181,7 +255,8 @@ impl Model {
                 let fits = |m: &&Media, tolerance: u8| {
                     let (w, l) = m.status_size_mm();
                     let code = if m.kind == Kind::Continuous { 0x0A } else { 0x0B };
-                    code == media_type && w == width_mm && (m.kind == Kind::Continuous || l.abs_diff(length_mm) <= tolerance)
+                    // the QL-700 and QL-800 generations report 0x4A / 0x4B
+                    code == media_type & !0x40 && w == width_mm && (m.kind == Kind::Continuous || l.abs_diff(length_mm) <= tolerance)
                 };
                 self.media.iter().find(|m| fits(m, 0)).or_else(|| self.media.iter().find(|m| fits(m, 1)))
             }
@@ -247,6 +322,20 @@ mod tests {
         assert_eq!(ql.media_from_status(0x0B, 102, 152).unwrap().key(), "102x152");
         assert_eq!(ql.media_from_status(0x0B, 24, 24).unwrap().kind, Kind::Round);
         assert!(ql.media_from_status(0x0B, 62, 31).is_none());
+    }
+
+    #[test]
+    fn ql800_generation_reports_new_media_codes() {
+        let ql = Model::by_name("QL-820NWB").unwrap();
+        assert_eq!(ql.media_from_status(0x4A, 62, 0).unwrap().key(), "62");
+        assert_eq!(ql.media_from_status(0x4B, 62, 29).unwrap().key(), "62x29");
+    }
+
+    #[test]
+    fn status_less_models_are_found_by_product_name() {
+        let m = Model::by_product("PT-P750W").unwrap();
+        assert!(!m.protocol.status);
+        assert_eq!(Model::by_name("PT-9700PC").unwrap().protocol.support, Support::Unsupported);
     }
 
     #[test]

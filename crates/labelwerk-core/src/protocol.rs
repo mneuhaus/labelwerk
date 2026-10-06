@@ -9,7 +9,7 @@ use anyhow::{Result, bail, ensure};
 
 use crate::bitmap::Bitmap;
 use crate::media::{Kind, Media};
-use crate::model::{Family, Model, RasterCommand};
+use crate::model::{Family, ModeCommand, Model, RasterCommand};
 
 /// Feed margin limit on continuous tape (127 mm at 300 dpi; PT models document 127 mm as well).
 pub const MAX_MARGIN_MM: f32 = 127.0;
@@ -62,38 +62,60 @@ pub fn encode_job(model: &Model, media: &Media, pages: &[&Bitmap], opts: &PrintO
 
     for (i, page) in pages.iter().enumerate() {
         check_page(model, media, page)?;
-        out.extend_from_slice(&[ESC, b'i', b'a', 0x01]); // raster mode, repeated per page like the drivers
-        let (w_mm, l_mm) = media.status_size_mm();
-        let mut valid = proto.info_flags;
-        if opts.quality {
-            valid |= 0x40;
+        match proto.mode {
+            // repeated per page, like Brother's drivers do
+            ModeCommand::DynamicMode => out.extend_from_slice(&[ESC, b'i', b'a', 0x01]),
+            ModeCommand::GraphicsMode => out.extend_from_slice(&[ESC, b'i', b'R', 0x01]),
+            ModeCommand::None => {}
         }
-        out.extend_from_slice(&[ESC, b'i', b'z', valid, media.media_type, w_mm, l_mm]);
-        out.extend_from_slice(&page.height.to_le_bytes());
-        out.extend_from_slice(&[(i > 0) as u8, 0]);
-        out.extend_from_slice(&[ESC, b'i', b'M', if opts.auto_cut { 0x40 } else { 0 }]);
+        if proto.info {
+            let (w_mm, l_mm) = media.status_size_mm();
+            let mut valid = proto.info_flags;
+            if opts.quality {
+                valid |= 0x40;
+            }
+            let last = i + 1 == pages.len();
+            let position = match (proto.last_page_flag && last, i) {
+                (true, _) => 2,
+                (false, 0) => 0,
+                (false, _) => 1,
+            };
+            out.extend_from_slice(&[ESC, b'i', b'z', valid, media.media_type, w_mm, l_mm]);
+            out.extend_from_slice(&page.height.to_le_bytes());
+            out.extend_from_slice(&[position, 0]);
+        }
+        if proto.cutter {
+            out.extend_from_slice(&[ESC, b'i', b'M', if opts.auto_cut { 0x40 } else { 0 }]);
+        }
         if proto.cut_every {
             out.extend_from_slice(&[ESC, b'i', b'A', opts.cut_every.max(1)]);
         }
-        let end = if opts.cut_at_end { 0x08 } else { 0 };
-        let expanded = match model.family {
-            // Bit 1 is undocumented; Brother's QL-1100 driver sets it for all media but the 12 and 24 mm round
-            // labels.
-            Family::Ql if model.head_pins == 1296 && !matches!(media.id, 362 | 363) => end | 0x02,
-            _ => end,
-        };
-        out.extend_from_slice(&[ESC, b'i', b'K', expanded]);
-        out.extend_from_slice(&[ESC, b'i', b'd']);
-        out.extend_from_slice(&margin_dots(model, media, opts).to_le_bytes());
-        if proto.compression {
-            out.extend_from_slice(&[b'M', 0x02]); // TIFF (PackBits)
+        if proto.expanded {
+            let end = if opts.cut_at_end { 0x08 } else { 0 };
+            let expanded = match model.family {
+                // Bit 1 is undocumented; Brother's QL-1100 driver sets it for all media but the 12 and 24 mm round
+                // labels.
+                Family::Ql if model.head_pins == 1296 && !matches!(media.id, 362 | 363) => end | 0x02,
+                _ => end,
+            };
+            out.extend_from_slice(&[ESC, b'i', b'K', expanded]);
+        }
+        if proto.d460bt_magic {
+            // ptouch-print: margin 1, then "4D 00" (no compression), or the print comes out corrupted
+            out.extend_from_slice(&[ESC, b'i', b'd', 0x01, 0x00, b'M', 0x00]);
+        } else {
+            out.extend_from_slice(&[ESC, b'i', b'd']);
+            out.extend_from_slice(&margin_dots(model, media, opts).to_le_bytes());
+            if proto.compression {
+                out.extend_from_slice(&[b'M', 0x02]); // TIFF (PackBits)
+            }
         }
 
         let mut line = vec![0u8; line_bytes];
         let mut packed = Vec::with_capacity(line_bytes + 2);
         for y in 0..page.height {
             pack_line(model, media, page.row(y), &mut line);
-            let data: &[u8] = if proto.compression {
+            let data: &[u8] = if proto.compression && !proto.d460bt_magic {
                 packed.clear();
                 packbits(&line, &mut packed);
                 if packed.len() > line_bytes {
@@ -384,6 +406,57 @@ mod tests {
         let media = model.media_by_key("62").unwrap();
         assert!(encode_job(model, media, &[&Bitmap::new(600, 400)], &PrintOptions::default()).is_err());
         assert!(encode_job(model, media, &[&Bitmap::new(696, 100)], &PrintOptions::default()).is_err());
+    }
+
+    fn job_for(name: &str, key: &str, lines: u32, pages: usize) -> (Vec<u8>, Vec<DecodedPage>) {
+        let model = Model::by_name(name).unwrap();
+        let media = model.media_by_key(key).unwrap();
+        let lines = if media.kind == Kind::Continuous { lines } else { media.print_length };
+        let mut page = Bitmap::new(media.print_width, lines);
+        page.set(0, 0, true);
+        let refs: Vec<&Bitmap> = std::iter::repeat_n(&page, pages).collect();
+        let job = encode_job(model, media, &refs, &PrintOptions::default()).unwrap();
+        let decoded = decode_job(model, &job).unwrap();
+        assert_eq!(lines_to_bitmap(model, media, &decoded[0].lines), page, "{name} round trip");
+        (job, decoded)
+    }
+
+    /// QL-800 Raster Command Reference: no compression, 400 invalidate bytes, raw 90-byte `g` lines.
+    #[test]
+    fn ql800_sends_uncompressed_lines() {
+        let (job, pages) = job_for("QL-800", "62", 400, 1);
+        assert!(job[..400].iter().all(|&b| b == 0) && job[400..402] == INITIALIZE);
+        assert!(!pages[0].commands.iter().any(|c| c[0] == b'M'));
+        let first_g = job.iter().position(|&b| b == b'g').unwrap();
+        assert_eq!(job[first_g + 2], 90);
+    }
+
+    /// QL-500: raster mode only, no mode switch, no cutter, no expanded mode.
+    #[test]
+    fn ql500_sends_only_what_it_knows() {
+        let (_, pages) = job_for("QL-500", "62", 400, 1);
+        let starts: Vec<[u8; 3]> = pages[0].commands.iter().map(|c| [c[0], c[1], *c.get(2).unwrap_or(&0)]).collect();
+        assert!(!starts.contains(&[ESC, b'i', b'a']));
+        assert!(!starts.contains(&[ESC, b'i', b'M']));
+        assert!(!starts.contains(&[ESC, b'i', b'K']));
+    }
+
+    /// PT-P900 family: n9 = 2 marks the last page.
+    #[test]
+    fn p900_marks_the_last_page() {
+        let (_, pages) = job_for("PT-P900W", "24", 200, 2);
+        let info = |p: &DecodedPage| p.commands.iter().find(|c| c.starts_with(&[ESC, b'i', b'z'])).unwrap().clone();
+        assert_eq!(info(&pages[0])[11], 0);
+        assert_eq!(info(&pages[1])[11], 2);
+    }
+
+    /// PT-D460BT group (ptouch-print): margin magic with "4D 00", uncompressed G lines, n9 = 2.
+    #[test]
+    fn d460bt_magic_sequence() {
+        let (job, pages) = job_for("PT-D460BT", "18", 200, 1); // 18 mm is its widest tape
+        assert!(job.windows(7).any(|w| w == [ESC, b'i', b'd', 0x01, 0x00, b'M', 0x00]));
+        assert!(!pages[0].commands.iter().any(|c| c.starts_with(&[ESC, b'i', b'K'])));
+        assert!(job.windows(3).any(|w| w == [b'G', 16, 0]));
     }
 
     /// Raster Command Reference PT-E550W/P750W/P710BT, 2.1: "printing 100 mm on 24-mm-wide tape with the
