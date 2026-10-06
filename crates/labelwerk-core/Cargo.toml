@@ -1,0 +1,12 @@
+[package]
+name = "labelwerk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Brother QL-1100 label rendering, raster protocol and transports"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+png = "0.18"
