@@ -206,7 +206,7 @@ fn pick_model_and_media(model: Option<&str>, media: Option<&str>) -> Result<(&'s
 
 fn open_printer() -> Result<UsbPrinter> {
     let devices = transport::list_usb()?;
-    let device = devices.first().ok_or_else(|| NotReady("no Brother QL printer on USB".into()))?;
+    let device = devices.first().ok_or_else(|| NotReady("no Brother label printer on USB".into()))?;
     UsbPrinter::open(device)
 }
 
@@ -260,7 +260,7 @@ fn run(cli: &Cli) -> Result<()> {
                 println!("{}", serde_json::json!({ "ok": true, "usb": list, "queues": queues }));
             } else {
                 if printers.is_empty() {
-                    println!("No Brother QL printer on USB.");
+                    println!("No Brother label printer on USB.");
                 }
                 for (d, s) in &printers {
                     match s {

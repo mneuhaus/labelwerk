@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/labelwerk-core", "crates/labelwerk-cli", "crates/labelwerk-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT"
 
