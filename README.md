@@ -31,7 +31,7 @@ Apple, so macOS refuses the first start: click "Open Anyway" under System Settin
 xattr -dr com.apple.quarantine /Applications/Labelwerk.app
 ```
 
-**Windows:** unzip `Labelwerk-<version>-windows-x64.zip` and start `Labelwerk.exe`. The program is not code-signed,
+**Windows:** unzip `Labelwerk-<version>-windows-x64.zip` and start `Labelwerk\Labelwerk.exe`. The program is not code-signed,
 so SmartScreen may warn on the first start: "More info" → "Run anyway".
 
 Connect the printer over USB. No Brother driver is needed: Labelwerk talks to the printer directly (macOS: USB,

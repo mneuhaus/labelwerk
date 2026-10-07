@@ -31,13 +31,14 @@ jobs:
         shell: pwsh
         run: |
           $v = $env:TAG.TrimStart("v")
-          New-Item -ItemType Directory -Force dist/app, dist/cli | Out-Null
-          Copy-Item target/release/labelwerk-app.exe dist/app/Labelwerk.exe
-          Copy-Item target/release/labelwerk.exe dist/cli/labelwerk.exe
-          Copy-Item LICENSE dist/app/
-          Copy-Item LICENSE dist/cli/
-          Compress-Archive -Force dist/app/* "dist/Labelwerk-$v-windows-x64.zip"
-          Compress-Archive -Force dist/cli/* "dist/labelwerk-cli-$v-windows-x64.zip"
+          # one folder per zip: Labelwerk.exe and labelwerk.exe are the same file name on Windows
+          New-Item -ItemType Directory -Force dist/Labelwerk, dist/labelwerk-cli | Out-Null
+          Copy-Item target/release/labelwerk-app.exe dist/Labelwerk/Labelwerk.exe
+          Copy-Item target/release/labelwerk.exe dist/labelwerk-cli/labelwerk.exe
+          Copy-Item LICENSE dist/Labelwerk/
+          Copy-Item LICENSE dist/labelwerk-cli/
+          Compress-Archive -Force dist/Labelwerk "dist/Labelwerk-$v-windows-x64.zip"
+          Compress-Archive -Force dist/labelwerk-cli "dist/labelwerk-cli-$v-windows-x64.zip"
           Get-ChildItem dist/*.zip | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 $_).Hash.ToLower())  ./$($_.Name)"
           } | Set-Content -Encoding ascii "dist/SHA256SUMS-$v-windows.txt"
