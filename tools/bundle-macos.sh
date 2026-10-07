@@ -42,14 +42,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+xattr -cr "$APP" dist/labelwerk
 codesign --force --sign - dist/labelwerk
 codesign --force --sign - "$APP"
 echo "built $APP ($VERSION)"
 
 if [ "${1:-}" = "--universal" ]; then
     rm -f dist/*.zip dist/*.tar.gz
-    ditto -c -k --keepParent "$APP" "dist/Labelwerk-$VERSION-macos.zip"
-    tar -czf "dist/labelwerk-cli-$VERSION-macos.tar.gz" -C dist labelwerk
+    ditto -c -k --norsrc --noextattr --noacl --keepParent "$APP" "dist/Labelwerk-$VERSION-macos.zip"
+    COPYFILE_DISABLE=1 tar -czf "dist/labelwerk-cli-$VERSION-macos.tar.gz" -C dist labelwerk
     (cd dist && shasum -a 256 ./*.zip ./*.tar.gz > "SHA256SUMS-$VERSION.txt")
     ls -la dist
 fi
