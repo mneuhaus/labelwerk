@@ -45,7 +45,7 @@ pub struct HistoryEntry {
 impl HistoryEntry {
     pub fn title(&self) -> String {
         let first = self.label.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        if first.is_empty() { "(nur QR-Code)".into() } else { first.to_string() }
+        if first.is_empty() { crate::tr!("(QR code only)", "(nur QR-Code)").to_string() } else { first.to_string() }
     }
 }
 

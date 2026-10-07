@@ -7,6 +7,8 @@ use labelwerk_core::model::Support;
 use labelwerk_core::transport::{self, PrintEvent, Probe, SystemQueue, UsbPrinter};
 use labelwerk_core::{Bitmap, Media, Model, PrintOptions};
 
+use crate::{i18n, tr};
+
 /// One USB conversation at a time (polling and printing both claim the interface).
 static USB: Mutex<()> = Mutex::new(());
 
@@ -69,25 +71,25 @@ pub fn poll() -> PrinterState {
                     name: device.product.clone(),
                     model: None,
                     media: None,
-                    message: "Modell unbekannt".into(),
+                    message: tr!("Unknown model", "Modell unbekannt").to_string(),
                 },
                 Some(model) if !errors.is_empty() => PrinterState::Problem {
                     name: model.name.clone(),
                     model: Some(model),
                     media,
-                    message: errors.iter().map(|e| german(e)).collect::<Vec<_>>().join(", "),
+                    message: errors.iter().map(|e| localize(e)).collect::<Vec<_>>().join(", "),
                 },
                 Some(model) if model.protocol.support == Support::Unsupported => PrinterState::Problem {
                     name: model.name.clone(),
                     model: Some(model),
                     media,
-                    message: "Modell wird nicht unterstützt (anderes Protokoll)".into(),
+                    message: tr!("Model is not supported (different protocol)", "Modell wird nicht unterstützt (anderes Protokoll)").to_string(),
                 },
                 Some(model) if media.is_none() => PrinterState::Problem {
                     name: model.name.clone(),
                     model: Some(model),
                     media,
-                    message: "Unbekanntes Band / Etikett eingelegt".into(),
+                    message: tr!("Unknown tape / label loaded", "Unbekanntes Band / Etikett eingelegt").to_string(),
                 },
                 Some(model) => {
                     let colors = (model.family == labelwerk_core::Family::Pt).then_some((s.tape_color, s.text_color));
@@ -101,9 +103,9 @@ pub fn poll() -> PrinterState {
 
 /// Print over USB, checking printer and media first. Blocking. `Ok(false)`: sent, but the model cannot confirm.
 pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap>, opts: PrintOptions) -> Result<bool> {
-    let _guard = USB.lock().map_err(|_| anyhow!("USB lock poisoned"))?;
+    let _guard = USB.lock().map_err(|_| anyhow!(tr!("USB lock poisoned", "USB-Sperre beschädigt")))?;
     let devices = transport::list_usb()?;
-    let device = devices.first().ok_or_else(|| anyhow!("Kein Drucker an USB gefunden"))?;
+    let device = devices.first().ok_or_else(|| anyhow!(tr!("No printer found on USB", "Kein Drucker an USB gefunden")))?;
     let mut printer = UsbPrinter::open(device)?;
     let refs: Vec<&Bitmap> = pages.iter().collect();
     let mut confirmed = true;
@@ -112,7 +114,7 @@ pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap
             confirmed = false;
         }
     })
-    .map_err(|e| anyhow!(german(&format!("{e:#}"))))?;
+    .map_err(|e| anyhow!(localize(&format!("{e:#}"))))?;
     Ok(confirmed)
 }
 
@@ -128,8 +130,11 @@ pub fn print_queue(
     Ok(false)
 }
 
-/// The core speaks English; the app shows the printer's messages in German.
-pub fn german(msg: &str) -> String {
+/// The core speaks English; map its messages to German when the UI is German, else leave them as is.
+pub fn localize(msg: &str) -> String {
+    if !i18n::german() {
+        return msg.to_string();
+    }
     const MAP: &[(&str, &str)] = &[
         ("No media loaded", "Kein Band / keine Etiketten eingelegt"),
         ("Cutter jam", "Schneidmesser blockiert"),

@@ -1,16 +1,14 @@
 //! Getting bytes to the printer: direct USB (with status) or a system print queue (raw, no status).
 //!
-//! P-touch Editor talks to the printer over USB directly (IOKit bulk endpoints), so does `UsbPrinter`
-//! via `nusb`. On Windows `nusb` needs the WinUSB driver; there the spooler route is the way to go.
+//! P-touch Editor talks to the printer over USB directly, so does `UsbPrinter`: through `nusb` on macOS
+//! and Linux, through the usbprint.sys device interface on Windows (see `unix` and `win`).
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
-use nusb::MaybeFuture;
-use nusb::transfer::{Bulk, In, Out};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::bitmap::Bitmap;
@@ -19,8 +17,16 @@ use crate::model::{Model, Support};
 use crate::protocol::{INITIALIZE, PrintOptions, STATUS_REQUEST, encode_job};
 use crate::status::{STATUS_LEN, Status, StatusType};
 
+#[cfg(not(windows))]
+mod unix;
+#[cfg(not(windows))]
+use unix as sys;
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+use win as sys;
+
 pub const BROTHER_VID: u16 = 0x04F9;
-const PRINTER_CLASS: u8 = 0x07;
 /// Zero bytes before a status request: enough to flush half a raster line of any model.
 const STATUS_INVALIDATE: usize = 400;
 
@@ -39,28 +45,14 @@ pub struct UsbDevice {
     pub serial: Option<String>,
     pub product_id: u16,
     #[serde(skip)]
-    info: nusb::DeviceInfo,
+    info: sys::DeviceRef,
 }
 
 /// Brother label printers (QL, PT) on USB.
 pub fn list_usb() -> Result<Vec<UsbDevice>> {
     trace(|| "list devices".into());
-    let devices = nusb::list_devices().wait().context("listing USB devices")?;
-    let found: Vec<UsbDevice> = devices
-        .filter(|d| d.vendor_id() == BROTHER_VID)
-        .filter(|d| {
-            d.product_string().is_some_and(|p| p.contains("QL-") || p.contains("PT-"))
-                || d.interfaces().any(|i| i.class() == PRINTER_CLASS)
-        })
-        .map(|d| UsbDevice {
-            product: d.product_string().unwrap_or("Brother printer").to_string(),
-            serial: d.serial_number().map(str::to_string),
-            product_id: d.product_id(),
-            info: d,
-        })
-        .collect();
+    let mut found = sys::list()?;
     // macOS can list one device twice for a moment (after another process let go of it)
-    let mut found = found;
     let mut seen = std::collections::HashSet::new();
     found.retain(|d| d.serial.is_none() || seen.insert((d.product_id, d.serial.clone())));
     trace(|| format!("found {} Brother printer(s)", found.len()));
@@ -69,34 +61,14 @@ pub fn list_usb() -> Result<Vec<UsbDevice>> {
 
 pub struct UsbPrinter {
     pub device: UsbDevice,
-    reader: nusb::io::EndpointRead<Bulk>,
-    writer: nusb::io::EndpointWrite<Bulk>,
+    reader: sys::Reader,
+    writer: sys::Writer,
 }
 
 impl UsbPrinter {
     pub fn open(device: &UsbDevice) -> Result<Self> {
         trace(|| format!("open {} ({:04x})", device.product, device.product_id));
-        let dev = device.info.open().wait().with_context(|| format!("opening {}", device.product))?;
-        let config = dev.active_configuration().context("reading USB configuration")?;
-        let (number, ep_in, ep_out) = config
-            .interfaces()
-            .filter_map(|i| i.alt_settings().next())
-            .find_map(|alt| {
-                let bulk = |dir| {
-                    alt.endpoints()
-                        .find(|e| e.transfer_type() == nusb::descriptors::TransferType::Bulk && e.direction() == dir)
-                        .map(|e| e.address())
-                };
-                Some((alt.interface_number(), bulk(nusb::transfer::Direction::In)?, bulk(nusb::transfer::Direction::Out)?))
-            })
-            .ok_or_else(|| anyhow!("{} has no bulk printer interface", device.product))?;
-        let intf = dev
-            .detach_and_claim_interface(number)
-            .wait()
-            .with_context(|| format!("claiming {} (is another program printing to it?)", device.product))?;
-        trace(|| format!("claimed interface {number}, in {ep_in:#04x}, out {ep_out:#04x}"));
-        let reader = intf.endpoint::<Bulk, In>(ep_in)?.reader(64);
-        let writer = intf.endpoint::<Bulk, Out>(ep_out)?.writer(16 * 1024).with_write_timeout(Duration::from_secs(30));
+        let (reader, writer) = sys::open(device)?;
         Ok(Self { device: device.clone(), reader, writer })
     }
 
@@ -131,7 +103,7 @@ impl UsbPrinter {
     }
 }
 
-fn read_status(reader: &mut nusb::io::EndpointRead<Bulk>, timeout: Duration) -> Result<Option<Status>> {
+fn read_status(reader: &mut sys::Reader, timeout: Duration) -> Result<Option<Status>> {
     reader.set_read_timeout(timeout);
     let mut buf = [0u8; STATUS_LEN];
     match reader.read_exact(&mut buf) {
@@ -289,26 +261,16 @@ fn describe_errors(status: &Status) -> String {
     if errors.is_empty() { "The printer reported an error".into() } else { errors.join(", ") }
 }
 
-/// A CUPS queue that points at a supported Brother printer (macOS, Linux).
+/// A system print queue for a supported Brother printer: CUPS on macOS and Linux, the spooler on Windows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SystemQueue {
     pub name: String,
+    /// CUPS device URI, or the Windows port name
     pub uri: String,
 }
 
 pub fn list_system_queues() -> Vec<SystemQueue> {
-    let Ok(out) = std::process::Command::new("lpstat").arg("-v").env("LANG", "C").env("LC_ALL", "C").output() else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (head, uri) = line.split_once(": ")?;
-            let name = head.split_whitespace().last()?.to_string();
-            let wanted = ["QL-", "QL_", "PT-", "PT_"];
-            wanted.iter().any(|w| uri.contains(w) || name.contains(w)).then(|| SystemQueue { name, uri: uri.trim().to_string() })
-        })
-        .collect()
+    sys::list_queues()
 }
 
 /// Hand the raw job to the system queue. No status, no media check: the printer's own error light is
@@ -320,18 +282,5 @@ pub fn print_system_queue(
     pages: &[&Bitmap],
     opts: &PrintOptions,
 ) -> Result<()> {
-    let job = encode_job(model, media, pages, opts)?;
-    let mut child = std::process::Command::new("lp")
-        .args(["-d", &queue.name, "-o", "raw", "-t", "Labelwerk"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("starting lp")?;
-    child.stdin.take().expect("piped stdin").write_all(&job)?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("lp failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
+    sys::send_to_queue(queue, &encode_job(model, media, pages, opts)?)
 }

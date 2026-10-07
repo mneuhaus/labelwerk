@@ -1,5 +1,6 @@
 // Draws the app icon (graphite tile, centimetre grid, a signal-yellow tape with "Lw") and writes
-// crates/labelwerk-app/assets/Labelwerk.icns. Run: swift tools/make-icon.swift
+// crates/labelwerk-app/assets/Labelwerk.icns (macOS), Labelwerk.ico (Windows) and docs/icon.png.
+// Run: swift tools/make-icon.swift
 import AppKit
 import CoreText
 
@@ -100,4 +101,21 @@ iconutil.arguments = ["-c", "icns", iconset.path, "-o", out.path]
 try! iconutil.run()
 iconutil.waitUntilExit()
 try! draw(size: 512).write(to: root.appendingPathComponent("docs/icon.png"))
-print("wrote \(out.path) and docs/icon.png")
+
+// ICO with PNG entries (Windows Vista and later)
+let icoSizes = [16, 24, 32, 48, 64, 128, 256]
+let pngs = icoSizes.map { draw(size: $0) }
+var ico = Data()
+func le16(_ v: Int) { ico.append(contentsOf: [UInt8(v & 0xff), UInt8((v >> 8) & 0xff)]) }
+func le32(_ v: Int) { le16(v & 0xffff); le16(v >> 16) }
+le16(0); le16(1); le16(icoSizes.count)
+var offset = 6 + 16 * icoSizes.count
+for (size, png) in zip(icoSizes, pngs) {
+    ico.append(contentsOf: [UInt8(size & 0xff), UInt8(size & 0xff), 0, 0])  // 256 is written as 0
+    le16(1); le16(32); le32(png.count); le32(offset)
+    offset += png.count
+}
+for png in pngs { ico.append(png) }
+let icoURL = root.appendingPathComponent("crates/labelwerk-app/assets/Labelwerk.ico")
+try! ico.write(to: icoURL)
+print("wrote \(out.path), \(icoURL.path) and docs/icon.png")

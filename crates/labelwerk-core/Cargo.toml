@@ -3,7 +3,7 @@ name = "labelwerk-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Brother QL-1100 label rendering, raster protocol and transports"
+description = "Brother QL and PT label rendering, raster protocol and transports"
 
 [dependencies]
 anyhow.workspace = true
@@ -12,4 +12,18 @@ serde_json.workspace = true
 png = "0.18"
 cosmic-text = "0.19"
 qrcode = { version = "0.14", default-features = false }
+
+[target.'cfg(not(windows))'.dependencies]
 nusb = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }

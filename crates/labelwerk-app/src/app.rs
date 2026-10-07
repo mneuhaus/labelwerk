@@ -21,7 +21,7 @@ use labelwerk_core::model::Support;
 use labelwerk_core::{Align, Direction, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
 
 use crate::printer::{self, PrinterState};
-use crate::{tape, theme};
+use crate::{i18n, tape, theme, tr};
 use crate::store::{self, HistoryEntry, Saved};
 
 const INSPECTOR_W: f32 = 340.;
@@ -41,22 +41,24 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// German name of a medium.
+/// Display name of a medium, in the UI language.
 pub fn media_name(m: &Media) -> String {
     let (w, l) = m.nominal_mm();
     let (w, l) = (mm(w), mm(l));
     match (m.family, m.kind) {
-        (Family::Pt, _) if m.is_tube() => format!("{w} mm Schrumpfschlauch"),
-        (Family::Pt, _) => format!("{w} mm Band"),
-        (_, Kind::Continuous) => format!("{w} mm Endlosband"),
+        (Family::Pt, _) if m.is_tube() => format!("{w} mm {}", tr!("heat-shrink tube", "Schrumpfschlauch")),
+        (Family::Pt, _) => format!("{w} mm {}", tr!("tape", "Band")),
+        (_, Kind::Continuous) => format!("{w} mm {}", tr!("continuous tape", "Endlosband")),
         (_, Kind::DieCut) => format!("{w} × {l} mm"),
-        (_, Kind::Round) => format!("Ø {w} mm rund"),
+        (_, Kind::Round) => format!("Ø {w} mm {}", tr!("round", "rund")),
     }
 }
 
+/// A millimetre value for display: German uses a decimal comma, English a decimal point.
 fn mm(v: f32) -> String {
     let s = format!("{v:.1}");
-    s.trim_end_matches(".0").replace('.', ",")
+    let s = s.trim_end_matches(".0");
+    if i18n::german() { s.replace('.', ",") } else { s.to_string() }
 }
 
 #[derive(Clone)]
@@ -78,7 +80,7 @@ impl SearchableListItem for MediaItem {
             .w_full()
             .gap_2()
             .child(self.title.clone())
-            .when(self.loaded, |d| d.child(div().text_xs().text_color(cx.theme().success).child("eingelegt")))
+            .when(self.loaded, |d| d.child(div().text_xs().text_color(cx.theme().success).child(tr!("loaded", "eingelegt"))))
     }
 
     fn value(&self) -> &SharedString {
@@ -95,11 +97,14 @@ fn media_groups(model: &'static Model, loaded: Option<&Media>) -> SearchableVec<
         }))
     };
     let groups = match model.family {
-        Family::Pt => vec![group("Bänder", &|m| !m.is_tube()), group("Schrumpfschlauch", &|m| m.is_tube())],
+        Family::Pt => vec![
+            group(tr!("Tapes", "Bänder"), &|m| !m.is_tube()),
+            group(tr!("Heat-shrink tube", "Schrumpfschlauch"), &|m| m.is_tube()),
+        ],
         Family::Ql => vec![
-            group("Endlosband", &|m| m.kind == Kind::Continuous),
-            group("Etiketten", &|m| m.kind == Kind::DieCut),
-            group("Rund", &|m| m.kind == Kind::Round),
+            group(tr!("Continuous tape", "Endlosband"), &|m| m.kind == Kind::Continuous),
+            group(tr!("Labels", "Etiketten"), &|m| m.kind == Kind::DieCut),
+            group(tr!("Round", "Rund"), &|m| m.kind == Kind::Round),
         ],
     };
     SearchableVec::new(groups.into_iter().filter(|g| !g.items.is_empty()).collect::<Vec<_>>())
@@ -157,7 +162,7 @@ impl LabelApp {
         let text = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
-                .placeholder("Text des Etiketts")
+                .placeholder(tr!("Label text", "Text des Etiketts"))
                 .default_value(label.text.clone())
         });
         let families: Vec<SharedString> = renderer.families().iter().map(|f| SharedString::from(f.clone())).collect();
@@ -184,7 +189,9 @@ impl LabelApp {
         let padding = number(Some(label.padding_mm), 0.0, 20.0, 0.5, window, cx);
         let copies_input = number(Some(saved.copies.max(1) as f32), 1.0, 99.0, 1.0, window, cx);
         let qr_text = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Inhalt, leer = Etikettentext").default_value(label.qr_content.clone())
+            InputState::new(window, cx)
+                .placeholder(tr!("Content, blank = label text", "Inhalt, leer = Etikettentext"))
+                .default_value(label.qr_content.clone())
         });
 
         let mut subs = vec![
@@ -440,34 +447,49 @@ impl LabelApp {
     /// Why printing is not possible right now, if it is not.
     fn blocker(&self) -> Option<String> {
         if self.printing {
-            return Some("Druckt gerade …".into());
+            return Some(tr!("Printing…", "Druckt gerade …").to_string());
         }
         let empty = self.label.text.trim().is_empty() && !(self.label.qr && !self.label.qr_data().is_empty());
         if empty {
-            return Some("Das Etikett ist leer".into());
+            return Some(tr!("The label is empty", "Das Etikett ist leer").to_string());
         }
         if self.model.protocol.support == Support::Unsupported {
-            return Some(format!("{} spricht ein anderes Protokoll und wird nicht unterstützt", self.model.name));
+            let suffix = tr!(
+                "speaks a different protocol and is not supported",
+                "spricht ein anderes Protokoll und wird nicht unterstützt"
+            );
+            return Some(format!("{} {suffix}", self.model.name));
         }
         match &self.printer {
-            PrinterState::Searching => Some("Suche Drucker …".into()),
-            PrinterState::Missing { .. } => Some(format!("{} per USB anschließen und einschalten", self.model.name)),
+            PrinterState::Searching => Some(tr!("Searching for printer…", "Suche Drucker …").to_string()),
+            PrinterState::Missing { .. } => Some(if i18n::german() {
+                format!("{} per USB anschließen und einschalten", self.model.name)
+            } else {
+                format!("Connect {} via USB and turn it on", self.model.name)
+            }),
             PrinterState::Busy { queue: Some(_), .. } => None,
-            PrinterState::Busy { message, .. } => Some(format!("Drucker belegt: {message}")),
+            PrinterState::Busy { message, .. } => {
+                let prefix = tr!("Printer busy", "Drucker belegt");
+                Some(format!("{prefix}: {message}"))
+            }
             PrinterState::Problem { message, .. } => Some(message.clone()),
-            PrinterState::Ready { model, .. } if model.name != self.model.name => {
-                Some(format!("Angeschlossen ist ein {}", model.name))
-            }
-            PrinterState::Ready { media: Some(loaded), .. } if loaded.id != self.media.id => {
-                Some(format!("Eingelegt ist {}", media_name(loaded)))
-            }
+            PrinterState::Ready { model, .. } if model.name != self.model.name => Some(if i18n::german() {
+                format!("Angeschlossen ist ein {}", model.name)
+            } else {
+                format!("A {} is connected", model.name)
+            }),
+            PrinterState::Ready { media: Some(loaded), .. } if loaded.id != self.media.id => Some(if i18n::german() {
+                format!("Eingelegt ist {}", media_name(loaded))
+            } else {
+                format!("{} is loaded", media_name(loaded))
+            }),
             PrinterState::Ready { .. } => None,
         }
     }
 
     fn print(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(reason) = self.blocker() {
-            window.push_notification(Notification::warning(reason).title("Drucken nicht möglich"), cx);
+            window.push_notification(Notification::warning(reason).title(tr!("Cannot print", "Drucken nicht möglich")), cx);
             return;
         }
         let Some(rendered) = &self.rendered else { return };
@@ -500,12 +522,25 @@ impl LabelApp {
                         store::remember(&mut this.history, entry);
                         this.refresh_thumbs();
                         store::save(&this.saved());
-                        let what = if copies == 1 { "1 Etikett".to_string() } else { format!("{copies} Etiketten") };
-                        let title = if confirmed { "Gedruckt" } else { "Gesendet" };
-                        window.push_notification(Notification::success(format!("{what} auf {}", media_name(media))).title(title), cx);
+                        let what = if i18n::german() {
+                            if copies == 1 { "1 Etikett".to_string() } else { format!("{copies} Etiketten") }
+                        } else if copies == 1 {
+                            "1 label".to_string()
+                        } else {
+                            format!("{copies} labels")
+                        };
+                        let title = if confirmed { tr!("Printed", "Gedruckt") } else { tr!("Sent", "Gesendet") };
+                        let joiner = tr!("on", "auf");
+                        window.push_notification(
+                            Notification::success(format!("{what} {joiner} {}", media_name(media))).title(title),
+                            cx,
+                        );
                     }
                     Err(e) => {
-                        window.push_notification(Notification::error(printer::german(&format!("{e:#}"))).title("Druck fehlgeschlagen"), cx);
+                        window.push_notification(
+                            Notification::error(printer::localize(&format!("{e:#}"))).title(tr!("Print failed", "Druck fehlgeschlagen")),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -522,7 +557,7 @@ impl LabelApp {
             PrinterState::Ready { model, media: Some(m), colors } if model.name == self.model.name && m.id == self.media.id => {
                 tape::look(self.model.family, *colors)
             }
-            _ => tape::PAPER,
+            _ => tape::paper(),
         }
     }
 
@@ -546,13 +581,13 @@ impl LabelApp {
         let theme = cx.theme();
         let look = self.look();
         let (dot, title, detail): (Hsla, String, Option<String>) = match &self.printer {
-            PrinterState::Searching => (theme.muted_foreground, "Suche Drucker".into(), None),
-            PrinterState::Missing { .. } => (theme.muted_foreground, "Kein Drucker".into(), None),
+            PrinterState::Searching => (theme.muted_foreground, tr!("Searching for printer", "Suche Drucker").to_string(), None),
+            PrinterState::Missing { .. } => (theme.muted_foreground, tr!("No printer", "Kein Drucker").to_string(), None),
             PrinterState::Ready { model, media, .. } => {
                 (theme.success, model.name.clone(), media.map(media_short))
             }
             PrinterState::Problem { name, message, .. } => (theme.danger, name.clone(), Some(message.clone())),
-            PrinterState::Busy { product, .. } => (theme.warning, product.clone(), Some("belegt".into())),
+            PrinterState::Busy { product, .. } => (theme.warning, product.clone(), Some(tr!("busy", "belegt").to_string())),
         };
         let swatch = matches!(self.printer, PrinterState::Ready { .. }).then(|| {
             div()
@@ -573,7 +608,7 @@ impl LabelApp {
         h_flex()
             .h(px(52.))
             .flex_none()
-            .pl(px(84.)) // traffic lights
+            .pl(if cfg!(target_os = "macos") { px(84.) } else { px(16.) }) // traffic lights
             .pr_4()
             .items_center()
             .justify_between()
@@ -633,19 +668,25 @@ impl LabelApp {
 
         let text = v_flex()
             .gap_2()
-            .child(Self::eyebrow("Text", cx))
+            .child(Self::eyebrow(tr!("Text", "Text"), cx))
             .child(Textarea::new(&self.text))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().min_w_0().child(Select::new(&self.font).small().search_placeholder("Schrift suchen")))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Select::new(&self.font).small().search_placeholder(tr!("Search fonts", "Schrift suchen")),
+                        ),
+                    )
                     .child(
                         ButtonGroup::new("style")
                             .outline()
                             .small()
                             .multiple(true)
-                            .child(Button::new("bold").icon(IconName::Bold).selected(self.label.bold).tooltip("Fett"))
-                            .child(Button::new("italic").icon(IconName::Italic).selected(self.label.italic).tooltip("Kursiv"))
+                            .child(Button::new("bold").icon(IconName::Bold).selected(self.label.bold).tooltip(tr!("Bold", "Fett")))
+                            .child(
+                                Button::new("italic").icon(IconName::Italic).selected(self.label.italic).tooltip(tr!("Italic", "Kursiv")),
+                            )
                             .on_click(cx.listener(|this, sel: &Vec<usize>, window, cx| {
                                 this.label.bold = sel.contains(&0);
                                 this.label.italic = sel.contains(&1);
@@ -660,9 +701,24 @@ impl LabelApp {
                         ButtonGroup::new("align")
                             .outline()
                             .small()
-                            .child(Button::new("left").icon(IconName::TextAlignStart).selected(align == Align::Left).tooltip("Linksbündig"))
-                            .child(Button::new("center").icon(IconName::TextAlignCenter).selected(align == Align::Center).tooltip("Zentriert"))
-                            .child(Button::new("right").icon(IconName::TextAlignEnd).selected(align == Align::Right).tooltip("Rechtsbündig"))
+                            .child(
+                                Button::new("left")
+                                    .icon(IconName::TextAlignStart)
+                                    .selected(align == Align::Left)
+                                    .tooltip(tr!("Align left", "Linksbündig")),
+                            )
+                            .child(
+                                Button::new("center")
+                                    .icon(IconName::TextAlignCenter)
+                                    .selected(align == Align::Center)
+                                    .tooltip(tr!("Center", "Zentriert")),
+                            )
+                            .child(
+                                Button::new("right")
+                                    .icon(IconName::TextAlignEnd)
+                                    .selected(align == Align::Right)
+                                    .tooltip(tr!("Align right", "Rechtsbündig")),
+                            )
                             .on_click(cx.listener(|this, sel: &Vec<usize>, window, cx| {
                                 this.label.align = match sel.first() {
                                     Some(0) => Align::Left,
@@ -677,45 +733,51 @@ impl LabelApp {
 
         let design = v_flex()
             .gap_2()
-            .child(Self::eyebrow("Gestaltung", cx))
+            .child(Self::eyebrow(tr!("Design", "Gestaltung"), cx))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(tile("t-heading", IconName::Heading, "Überschrift", self.label.heading).on_click(cx.listener(
+                    .child(
+                        tile("t-heading", IconName::Heading, tr!("Heading", "Überschrift"), self.label.heading).on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.label.heading = !this.label.heading;
+                                this.changed(window, cx);
+                            }),
+                        ),
+                    )
+                    .child(tile("t-qr", IconName::QrCode, tr!("QR code", "QR-Code"), self.label.qr).on_click(cx.listener(
                         |this, _, window, cx| {
-                            this.label.heading = !this.label.heading;
+                            this.label.qr = !this.label.qr;
                             this.changed(window, cx);
                         },
                     )))
-                    .child(tile("t-qr", IconName::QrCode, "QR-Code", self.label.qr).on_click(cx.listener(|this, _, window, cx| {
-                        this.label.qr = !this.label.qr;
-                        this.changed(window, cx);
-                    })))
-                    .child(tile("t-frame", IconName::Square, "Rahmen", self.label.frame).on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.label.frame = !this.label.frame;
-                            this.changed(window, cx);
-                        },
-                    ))),
+                    .child(
+                        tile("t-frame", IconName::Square, tr!("Frame", "Rahmen"), self.label.frame).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.label.frame = !this.label.frame;
+                                this.changed(window, cx);
+                            },
+                        )),
+                    ),
             )
             .when(self.label.qr, |s| s.child(Input::new(&self.qr_text).small().prefix(Icon::new(IconName::QrCode).xsmall())));
 
         let support_hint = match self.model.protocol.support {
             Support::Verified => None,
-            Support::Documented => Some("Nach Brothers Befehlsreferenz umgesetzt"),
-            Support::Assumed => Some("Ungetestet, abgeleitet aus verwandten Modellen"),
-            Support::Unsupported => Some("Nicht unterstützt: anderes Druckprotokoll"),
+            Support::Documented => Some(tr!("Implemented per Brother's command reference", "Nach Brothers Befehlsreferenz umgesetzt")),
+            Support::Assumed => Some(tr!("Untested, derived from related models", "Ungetestet, abgeleitet aus verwandten Modellen")),
+            Support::Unsupported => Some(tr!("Not supported: different print protocol", "Nicht unterstützt: anderes Druckprotokoll")),
         };
         let tape = v_flex()
             .gap_2()
-            .child(Self::eyebrow("Drucker & Band", cx))
-            .child(Select::new(&self.model_select).small().search_placeholder("Modell suchen"))
+            .child(Self::eyebrow(tr!("Printer & Tape", "Drucker & Band"), cx))
+            .child(Select::new(&self.model_select).small().search_placeholder(tr!("Search models", "Modell suchen")))
             .when_some(support_hint, |s, hint| s.child(div().text_xs().text_color(theme.muted_foreground).child(hint)))
             .child(Select::new(&self.media_select).small().menu_max_h(rems(28.)))
             .child(
                 Switch::new("follow")
                     .checked(self.follow_printer)
-                    .label("Eingelegtes Band übernehmen")
+                    .label(tr!("Use loaded tape", "Eingelegtes Band übernehmen"))
                     .small()
                     .on_click(cx.listener(|this, checked: &bool, window, cx| {
                         this.follow_printer = *checked;
@@ -732,12 +794,14 @@ impl LabelApp {
                         .small()
                         .outline()
                         .icon(IconName::RefreshCw)
-                        .label(format!("Eingelegt: {}", media_name(l)))
+                        .label(format!("{}: {}", tr!("Loaded", "Eingelegt"), media_name(l)))
                         .on_click(cx.listener(|this, _, window, cx| this.use_loaded_media(window, cx))),
                 )
             })
-            .when(continuous, |s| s.child(Self::field("Länge", NumberInput::new(&self.length).small().suffix(unit("mm")), cx)))
-            .child(Self::field("Rand", NumberInput::new(&self.padding).small().suffix(unit("mm")), cx));
+            .when(continuous, |s| {
+                s.child(Self::field(tr!("Length", "Länge"), NumberInput::new(&self.length).small().suffix(unit("mm")), cx))
+            })
+            .child(Self::field(tr!("Margin", "Rand"), NumberInput::new(&self.padding).small().suffix(unit("mm")), cx));
 
         v_flex()
             .id("inspector")
@@ -897,10 +961,11 @@ impl LabelApp {
         }
         let mut detail = Vec::new();
         if let Some(pt) = r.font_pt {
-            detail.push(format!("Schrift {} pt{}", mm(pt), if self.label.size_pt.is_none() { " · auto" } else { "" }));
+            let word = tr!("Font", "Schrift");
+            detail.push(format!("{word} {} pt{}", mm(pt), if self.label.size_pt.is_none() { " · auto" } else { "" }));
         }
         if continuous && self.label.length_mm.is_none() {
-            detail.push("Länge folgt dem Text".into());
+            detail.push(tr!("Length follows the text", "Länge folgt dem Text").to_string());
         }
         let blocker = self.blocker().filter(|_| !self.printing);
 
@@ -932,8 +997,8 @@ impl LabelApp {
                         .ghost()
                         .selected(self.show_dots)
                         .icon(Icon::new(IconName::Grid3x3).text_color(mat_ink))
-                        .child(div().text_color(mat_ink).child("Druckpunkte"))
-                        .tooltip("Die einzelnen Punkte zeigen, die der Drucker setzt")
+                        .child(div().text_color(mat_ink).child(tr!("Print dots", "Druckpunkte")))
+                        .tooltip(tr!("Shows the individual dots the printer sets", "Die einzelnen Punkte zeigen, die der Drucker setzt"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.show_dots = !this.show_dots;
                             this.rerender(window, cx);
@@ -943,8 +1008,8 @@ impl LabelApp {
                         .small()
                         .ghost()
                         .icon(Icon::new(IconName::RotateCw).text_color(mat_ink))
-                        .child(div().text_color(mat_ink).child("Drehen"))
-                        .tooltip("Textrichtung drehen (⌘R)")
+                        .child(div().text_color(mat_ink).child(tr!("Rotate", "Drehen")))
+                        .tooltip(format!("{} ({})", tr!("Rotate text direction", "Textrichtung drehen"), shortcut_hint("R")))
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_direction(window, cx))),
                 ),
             )
@@ -967,7 +1032,7 @@ impl LabelApp {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .child(Icon::new(IconName::CircleAlert).xsmall())
-                            .child(german_warning(w))
+                            .child(localize_warning(w))
                     }))
                     .children(blocker.map(|b| {
                         h_flex()
@@ -987,7 +1052,7 @@ impl LabelApp {
     fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let blocked = self.blocker().is_some();
-        let label = if self.printing { "Druckt …" } else { "Drucken" };
+        let label = if self.printing { tr!("Printing…", "Druckt …") } else { tr!("Print", "Drucken") };
         let thumbs = self.history.iter().zip(&self.thumbs).take(12).enumerate().map(|(i, (entry, thumb))| {
             let e = entry.clone();
             let (image, aspect) = thumb.clone();
@@ -1027,13 +1092,16 @@ impl LabelApp {
                     .gap_2()
                     .items_center()
                     .overflow_x_scroll()
-                    .when(!self.history.is_empty(), |d| d.child(div().pr_1().child(Self::eyebrow("Zuletzt", cx))))
+                    .when(!self.history.is_empty(), |d| d.child(div().pr_1().child(Self::eyebrow(tr!("Recently printed", "Zuletzt"), cx))))
                     .when(self.history.is_empty(), |d| {
-                        d.child(div().text_sm().text_color(theme.muted_foreground).child("Gedruckte Etiketten erscheinen hier zum Nachdrucken."))
+                        d.child(div().text_sm().text_color(theme.muted_foreground).child(tr!(
+                            "Printed labels appear here to reprint.",
+                            "Gedruckte Etiketten erscheinen hier zum Nachdrucken."
+                        )))
                     })
                     .children(thumbs),
             )
-            .child(div().text_sm().text_color(theme.muted_foreground).child("Anzahl"))
+            .child(div().text_sm().text_color(theme.muted_foreground).child(tr!("Copies", "Anzahl")))
             .child(div().w(px(116.)).child(NumberInput::new(&self.copies_input)))
             .child(
                 Button::new("print")
@@ -1043,7 +1111,7 @@ impl LabelApp {
                     .label(label)
                     .loading(self.printing)
                     .disabled(blocked)
-                    .tooltip("Drucken (⌘P)")
+                    .tooltip(format!("{} ({})", tr!("Print", "Drucken"), shortcut_hint("P")))
                     .on_click(cx.listener(|this, _, window, cx| this.print(window, cx))),
             )
     }
@@ -1064,13 +1132,22 @@ fn mat_scale(view: Size<Pixels>, w_mm: f32, h_mm: f32) -> f32 {
     ((mat_w - 260.) / w_mm).min((mat_h - 220.) / h_mm).clamp(0.5, MAX_PT_PER_MM)
 }
 
-fn german_warning(w: &str) -> String {
+/// The core's warnings are English; map them to German when the UI is German, else leave them as is.
+fn localize_warning(w: &str) -> String {
+    if !i18n::german() {
+        return w.to_string();
+    }
     match w {
         "Text does not fit at this size" => "Text passt in dieser Größe nicht aufs Etikett".into(),
         "QR code is too small for this label" => "QR-Code ist für dieses Etikett zu klein".into(),
         "Length adjusted to what the printer can do" => "Länge an die Grenzen des Druckers angepasst".into(),
         other => other.to_string(),
     }
+}
+
+/// Keyboard-shortcut hint for a tooltip: the Command symbol on macOS, "Ctrl"/"Strg" elsewhere.
+fn shortcut_hint(key: &str) -> String {
+    if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("{}+{key}", tr!("Ctrl", "Strg")) }
 }
 
 /// `a` moved towards `b` by `t`.

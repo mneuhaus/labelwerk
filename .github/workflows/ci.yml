@@ -6,12 +6,21 @@ on:
   pull_request:
 
 jobs:
-  test:
+  macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Metal toolchain (gpui compiles its shaders at build time)
         run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - run: rustup show active-toolchain && rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
       - run: rustup show active-toolchain && rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace

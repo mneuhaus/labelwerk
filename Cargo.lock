@@ -3680,19 +3680,21 @@ dependencies = [
 
 [[package]]
 name = "labelwerk-app"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "embed-resource",
  "gpui-kit",
  "labelwerk-core",
  "serde",
  "serde_json",
+ "sys-locale",
 ]
 
 [[package]]
 name = "labelwerk-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3702,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "labelwerk-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "cosmic-text",
@@ -3711,6 +3713,7 @@ dependencies = [
  "qrcode",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

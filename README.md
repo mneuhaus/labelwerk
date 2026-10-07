@@ -1,114 +1,124 @@
 # Labelwerk
 
-Etiketten drucken auf Brother-Labeldruckern (QL- und PT-Serie), ohne P-touch Editor. Rust, Oberfläche mit
-GPUI (gpui-kit 0.7), damit später auch Windows geht.
+Label printing for Brother label printers (QL and PT series) without P-touch Editor. Written in Rust, interface
+in GPUI (gpui-kit 0.7), for macOS and Windows.
 
-**Status: 0.1.0-alpha.1.** Läuft auf macOS (Apple Silicon und Intel, ab macOS 13). Oberfläche auf Deutsch.
-Seite: <https://mneuhaus.github.io/labelwerk/>
+**Status: 0.1.0-alpha.2.** macOS 13+ (Apple Silicon and Intel) and Windows 10/11 (x64; runs on Windows on Arm
+through emulation). The interface is in English, or German when the system language is German.
+Website: <https://mneuhaus.github.io/labelwerk/>
 
 ![Labelwerk](docs/screenshot-dark.png)
 
-- Text eintippen, die Vorschau zeigt das Etikett in echter Größe und mit genau dem Layout, das gedruckt wird.
-  Ein Klick auf „Druckpunkte" zeigt die Punkte, die der Drucker wirklich setzt.
-- Schrift: mitgelieferte Barlow oder Systemschriften, fett/kursiv, Ausrichtung, Größe automatisch („so groß wie
-  passt") oder fest in pt; erste Zeile als Überschrift
-- Endlosband: Länge passt sich dem Inhalt an oder fest in mm; Text längs oder quer (⌘R)
-- Extras: QR-Code (Etikettentext oder eigener Inhalt), Rahmen, Rand
-- Drucker wird per USB erkannt (Modell, eingelegtes Band/Etikett samt Bandfarbe, Fehler wie „Deckel offen"), die
-  App stellt sich automatisch darauf ein
-- „Zuletzt gedruckt" zum schnellen Nachdrucken, Zustand bleibt beim Neustart erhalten
-- ⌘P druckt
+- Type the text; the preview shows the label at real size with exactly the layout that gets printed.
+  "Print dots" shows the dots the print head actually sets.
+- Type: bundled Barlow or any system font, bold/italic, alignment, size automatic ("as big as it fits") or fixed in
+  pt; first line as a heading
+- Continuous tape: length follows the content or is fixed in mm; text along or across the tape (⌘R / Ctrl+R)
+- Extras: QR code (label text or own content), frame, margin
+- The printer is detected over USB (model, loaded tape or labels including the tape colour, errors such as "cover
+  open"), and the app adjusts itself to it
+- "Recently printed" for quick reprints; the state survives a restart
+- ⌘P / Ctrl+P prints
 
-## Installieren
+## Install
 
-Unter [Releases](https://github.com/mneuhaus/labelwerk/releases) liegen `Labelwerk-<version>-macos.zip` (App) und
-`labelwerk-cli-<version>-macos.tar.gz` (Kommandozeile). App entpacken und nach „Programme" ziehen.
+[Releases](https://github.com/mneuhaus/labelwerk/releases) has the app and the command line tool for both systems.
 
-Die App ist nicht von Apple notarisiert. Beim ersten Start meldet macOS deshalb, dass sie nicht geöffnet werden
-kann: unter Systemeinstellungen → Datenschutz & Sicherheit auf „Dennoch öffnen" klicken, oder einmalig
+**macOS:** unzip `Labelwerk-<version>-macos.zip` and move the app to Applications. The app is not notarized by
+Apple, so macOS refuses the first start: click "Open Anyway" under System Settings → Privacy & Security, or run once
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Labelwerk.app
 ```
 
-Der Drucker hängt per USB am Mac. Ein Brother-Treiber ist nicht nötig.
+**Windows:** unzip `Labelwerk-<version>-windows-x64.zip` and start `Labelwerk.exe`. The program is not code-signed,
+so SmartScreen may warn on the first start: "More info" → "Run anyway".
 
-## Selbst bauen
+Connect the printer over USB. No Brother driver is needed: Labelwerk talks to the printer directly (macOS: USB,
+Windows: the built-in "USB Printing Support" driver). PT printers with an Editor Lite button (PT-P710BT, PT-P750W)
+must have Editor Lite switched off (its LED dark), otherwise they show up as a USB drive instead of a printer.
+
+## Build
 
 ```sh
-./tools/bundle-macos.sh                # dist/Labelwerk.app und dist/labelwerk (CLI) für diesen Mac
-./tools/bundle-macos.sh --universal    # Apple Silicon + Intel, dazu die Release-Archive in dist/
+./tools/bundle-macos.sh                # dist/Labelwerk.app and dist/labelwerk (CLI) for this Mac
+./tools/bundle-macos.sh --universal    # Apple Silicon + Intel, plus the release archives in dist/
 open dist/Labelwerk.app
 ```
 
-Entwicklung: `cargo run -p labelwerk-app` (App) bzw. `cargo run -p labelwerk-cli -- --help`.
-Umgebung: `LABELWERK_STATE=<datei>` (eigener Zustand für Tests), `LABELWERK_THEME=light|dark`,
-`LABELWERK_CANVAS=graphit|hell|matte` (Arbeitsfläche), `LABELWERK_DEBUG=1` (USB-Verkehr auf stderr).
-Das App-Icon entsteht mit `swift tools/make-icon.swift`.
+Windows: `cargo build --release -p labelwerk-app -p labelwerk-cli` (needs the Windows SDK for gpui's shader
+compiler). Releases build the Windows downloads on GitHub Actions (`.github/workflows/release-windows.yml`) and
+attach them to the release.
+
+Development: `cargo run -p labelwerk-app` (app) or `cargo run -p labelwerk-cli -- --help`.
+Environment: `LABELWERK_STATE=<file>` (separate state for tests), `LABELWERK_THEME=light|dark`,
+`LABELWERK_LANG=en|de`, `LABELWERK_CANVAS=graphit|hell|matte` (work surface), `LABELWERK_DEBUG=1` (USB traffic on
+stderr). `swift tools/make-icon.swift` draws the app icons.
 
 ## CLI
 
 ```sh
-labelwerk status                         # angeschlossener Drucker, eingelegtes Medium
-labelwerk models                         # alle bekannten Modelle mit Unterstützungsgrad
-labelwerk media --model PT-P710BT        # Bänder/Etiketten eines Modells
-labelwerk render -t "Kabel\nHDMI" --bold -o vorschau.png [--job job.bin]
-labelwerk print  -t "M3 Schrauben" --copies 3
+labelwerk status                         # connected printer, loaded media
+labelwerk models                         # every known model with its support level
+labelwerk media --model PT-P710BT        # tapes/labels of one model
+labelwerk render -t "Cable\nHDMI" --bold -o preview.png [--job job.bin]
+labelwerk print  -t "M3 screws" --copies 3
 labelwerk decode job.bin --model PT-P710BT --media 24 -o job.png
 ```
 
-`--json` liefert ein JSON-Objekt; Exit-Codes: 0 ok, 1 Fehler, 2 Drucker nicht bereit.
+`--json` prints one JSON object; exit codes: 0 ok, 1 error, 2 printer not ready.
 
-## Unterstützte Drucker
+## Supported printers
 
-Die Modell- und Mediendaten (56 QL- und PT-Modelle, Pins, Druckbreiten, Offsets) stammen aus P-touch Editors
-eigenen Modelldefinitionen (`tools/import-ptouch.py` → `crates/labelwerk-core/data/models.json`). Das
-Protokoll je Modell steht in `crates/labelwerk-core/src/model.rs` und `research/protocol-table.md`.
+The model and media data (56 QL and PT models, pins, print widths, offsets) come from P-touch Editor's own model
+definitions (`tools/import-ptouch.py` → `crates/labelwerk-core/data/models.json`). The protocol per model is in
+`crates/labelwerk-core/src/model.rs` and `research/protocol-table.md`.
 
-| Stufe | Bedeutung | Modelle |
+| Level | Meaning | Models |
 |---|---|---|
-| Verified | Byte für Byte gegen Brothers Treiber geprüft | QL-1100 |
-| Documented | nach Brothers Raster-Referenz für genau dieses Modell | übrige QL-Modelle (QL-500 bis QL-1115NWB), PT-P710BT (Status und Druck auf dem Gerät laufen, Sichtprüfung offen), PT-P700/P750W, PT-E500/E550W, PT-H500, PT-P900-Reihe |
-| Assumed | gleiche Familie und Druckkopf wie dokumentierte Modelle | übrige PT-D/E/P-Modelle, siehe `labelwerk models` |
-| Unsupported | anderes Protokoll | PT-9500PC/9600/9700PC/9800PCN/3600, PT-18R/18NR, PT-N25BT |
+| Verified | checked byte for byte against Brother's driver | QL-1100 |
+| Documented | follows Brother's raster command reference for exactly this model | the other QL models (QL-500 to QL-1115NWB), PT-P710BT (status and printing work on the device, visual check pending), PT-P700/P750W, PT-E500/E550W, PT-H500, PT-P900 series |
+| Assumed | same family and print head as documented models | the other PT-D/E/P models, see `labelwerk models` |
+| Unsupported | different protocol | PT-9500PC/9600/9700PC/9800PCN/3600, PT-18R/18NR, PT-N25BT |
 
-TD-, RJ-, TJ-, PJ-, MW- und VC-Geräte sprechen andere Protokolle und sind nicht dabei. Rückmeldungen, welches
-Modell bei dir druckt (oder nicht), helfen sehr: bitte als Issue mit der Ausgabe von `labelwerk status --json`.
+TD, RJ, TJ, PJ, MW and VC devices speak other protocols and are not included. Reports on which model prints for you
+(or doesn't) help a lot: please open an issue with the output of `labelwerk status --json`.
 
-## Aufbau
+## Layout
 
 ```
-crates/labelwerk-core   Modelle/Medien, Raster-Protokoll (PackBits, Status), Renderer, USB/CUPS-Transport
+crates/labelwerk-core   models/media, raster protocol (PackBits, status), renderer, USB and system queue transport
 crates/labelwerk-cli    labelwerk (CLI)
-crates/labelwerk-app    Labelwerk (GPUI-App)
-tools/                  import-ptouch.py, bundle-macos.sh, make-icon.swift, winid.swift (Fenster-ID für Screenshots)
-research/               Notizen; Brother-PDFs und Referenzdaten liegen lokal in research/docs (nicht im Git)
-docs/                   GitHub-Page
+crates/labelwerk-app    Labelwerk (GPUI app)
+tools/                  import-ptouch.py, bundle-macos.sh, make-icon.swift, winid.swift (window id for screenshots)
+research/               notes; Brother's PDFs and reference data stay local in research/docs (not in git)
+docs/                   website (GitHub Pages)
 ```
 
-Druckweg: USB direkt über `nusb` (so macht es auch P-touch Editor, mit Statusabfrage). Fallback: rohe Daten an
-eine CUPS-Warteschlange (`lp -o raw`), wenn USB belegt ist.
+Printing goes over USB directly, with status, the way P-touch Editor does it: through `nusb` on macOS and Linux,
+through the usbprint.sys device interface on Windows. Fallback when USB is busy: the raw job goes to a system queue
+(CUPS `lp -o raw`, or the Windows spooler with the RAW datatype).
 
-## Prüfung
+## Tests
 
-- `cargo test --workspace`
-- `crates/labelwerk-core/tests/brother_filter.rs` schickt Testbilder durch Brothers macOS-Treiber
-  (`rastertobrotherQL1100`) und vergleicht Befehle und jede Rasterzeile mit unserem Encoder. 22 von 25
-  QL-1100-Medien sind byte-identisch; bei 23×23 mm, 60×86 mm und Ø 12 mm weicht Brothers CUPS-Treiber von
-  Brothers eigener Referenz und P-touch Editor ab, dort folgt Labelwerk der Referenz. Ohne installierten Treiber
-  werden diese Tests übersprungen.
-- PT-P710BT: Status und Druck auf dem echten Gerät (24 mm TZe).
+- `cargo test --workspace` (CI runs it on macOS and Windows)
+- `crates/labelwerk-core/tests/brother_filter.rs` sends test pages through Brother's macOS driver
+  (`rastertobrotherQL1100`) and compares commands and every raster line with Labelwerk's encoder. 22 of 25 QL-1100
+  media are byte-identical; for 23×23 mm, 60×86 mm and Ø 12 mm Brother's CUPS driver differs from Brother's own
+  reference and P-touch Editor, and Labelwerk follows the reference. Without the driver these tests are skipped.
+- PT-P710BT: status and printing on the real device (24 mm TZe) on macOS.
 
-## Offen
+## Open
 
-- Windows: `nusb` braucht dort WinUSB; der saubere Weg ist der Spooler (RAW über den installierten Brother-Treiber)
-- Netzwerkdrucker (QL-1110NWB, PT-P750W über TCP 9100) und Bluetooth
-- Zweifarbdruck (QL-8xx), 600/360-dpi-Hochauflösung, Halbschnitt, Kettendruck
-- Bilder/Logos und Barcodes außer QR
-- Notarisierte App (Apple Developer ID)
+- Windows printing on real hardware is untested so far (the transport is built from Microsoft's usbprint
+  interface; reports welcome)
+- Network printers (QL-1110NWB, PT-P750W over TCP 9100) and Bluetooth
+- Two-colour printing (QL-8xx), 600/360 dpi high resolution, half cut, chain printing
+- Images/logos and barcodes other than QR
+- Notarized macOS app, signed Windows build
 
-## Lizenz
+## License
 
-MIT, siehe [LICENSE](LICENSE). Die mitgelieferten Schriften Barlow und IBM Plex Mono stehen unter der SIL Open
-Font License (Texte neben den Schriftdateien). Labelwerk ist kein Produkt von Brother; Brother, P-touch und die
-Modellnamen sind Marken der Brother Industries, Ltd.
+MIT, see [LICENSE](LICENSE). The bundled fonts Barlow and IBM Plex Mono are under the SIL Open Font License (texts
+next to the font files). Labelwerk is not a Brother product; Brother, P-touch and the model names are trademarks of
+Brother Industries, Ltd.

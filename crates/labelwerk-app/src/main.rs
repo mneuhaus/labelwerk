@@ -6,6 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod i18n;
 mod printer;
 mod store;
 mod tape;
@@ -15,6 +16,9 @@ use std::borrow::Cow;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
+
+// `tr!` is exported straight to the crate root by `#[macro_export]`, so main.rs (the crate root
+// module) can call it without a `use` — unlike the other modules, which do `use crate::tr;`.
 
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
@@ -57,9 +61,9 @@ fn menus(cx: &mut App) {
         KeyBinding::new("alt-f4", Quit, None),
     ]);
     cx.set_menus([Menu::new("Labelwerk").items([
-        MenuItem::action("Labelwerk ausblenden", Hide),
+        MenuItem::action(tr!("Hide Labelwerk", "Labelwerk ausblenden"), Hide),
         MenuItem::separator(),
-        MenuItem::action("Labelwerk beenden", Quit),
+        MenuItem::action(tr!("Quit Labelwerk", "Labelwerk beenden"), Quit),
     ])]);
 }
 
@@ -85,7 +89,8 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Labelwerk".into()),
-                    appears_transparent: true,
+                    // macOS: the header runs under the traffic lights; Windows and Linux keep the system title bar
+                    appears_transparent: cfg!(target_os = "macos"),
                     traffic_light_position: Some(point(px(18.), px(18.))),
                 }),
                 window_min_size: Some(size(px(980.), px(640.))),

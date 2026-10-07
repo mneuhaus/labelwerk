@@ -1,0 +1,49 @@
+# Builds the Windows downloads and attaches them to a GitHub release. The macOS downloads are built
+# locally (tools/bundle-macos.sh --universal) and uploaded with the release itself.
+name: Windows release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload to (e.g. v0.1.0-alpha.2)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p labelwerk-app -p labelwerk-cli
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = $env:TAG.TrimStart("v")
+          New-Item -ItemType Directory -Force dist/app, dist/cli | Out-Null
+          Copy-Item target/release/labelwerk-app.exe dist/app/Labelwerk.exe
+          Copy-Item target/release/labelwerk.exe dist/cli/labelwerk.exe
+          Copy-Item LICENSE dist/app/
+          Copy-Item LICENSE dist/cli/
+          Compress-Archive -Force dist/app/* "dist/Labelwerk-$v-windows-x64.zip"
+          Compress-Archive -Force dist/cli/* "dist/labelwerk-cli-$v-windows-x64.zip"
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_).Hash.ToLower())  ./$($_.Name)"
+          } | Set-Content -Encoding ascii "dist/SHA256SUMS-$v-windows.txt"
+          Get-Content "dist/SHA256SUMS-$v-windows.txt"
+      - name: Upload to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $env:TAG (Get-ChildItem dist/*.zip, dist/SHA256SUMS-*.txt).FullName --clobber

@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Labelwerk · Etiketten drucken auf Brother-Labeldruckern</title>
-<meta name="description" content="Labelwerk ist eine schlanke Mac-App für Brother-Labeldrucker der QL- und PT-Serie: Text eintippen, Vorschau in echter Größe, drucken. Open Source, ohne P-touch Editor.">
+<title>Labelwerk · Label printing for Brother label printers</title>
+<meta name="description" content="Labelwerk is a lean app for Brother QL and PT label printers on macOS and Windows: type, see the label at real size, print. Open source, no P-touch Editor.">
 <meta property="og:title" content="Labelwerk">
-<meta property="og:description" content="Etiketten drucken auf Brother-Labeldruckern (QL und PT), ohne P-touch Editor.">
+<meta property="og:description" content="Label printing for Brother QL and PT label printers on macOS and Windows, without P-touch Editor.">
 <meta property="og:image" content="https://mneuhaus.github.io/labelwerk/screenshot-dark.png">
 <link rel="icon" type="image/png" href="icon.png">
 <style>
@@ -112,109 +112,113 @@ footer a { color: var(--muted); }
     <span class="name">Labelwerk</span>
     <span class="badge">0.1 Alpha</span>
     <nav>
-      <a href="#funktionen">Funktionen</a>
-      <a href="#drucker">Drucker</a>
-      <a href="#installieren">Installieren</a>
+      <a href="#features">Features</a>
+      <a href="#printers">Printers</a>
+      <a href="#install">Install</a>
       <a href="https://github.com/mneuhaus/labelwerk">GitHub</a>
     </nav>
   </header>
 
   <div class="hero">
-    <h1>Etiketten drucken. <span class="tape">Ohne Umweg.</span></h1>
-    <p>Labelwerk ist eine schlanke Mac-App für Brother-Labeldrucker der QL- und PT-Serie. Text eintippen, das Etikett
-      in echter Größe sehen, drucken. Ohne P-touch Editor, ohne Treiber, Open Source.</p>
+    <h1>Print labels. <span class="tape">No detours.</span></h1>
+    <p>Labelwerk is a lean app for Brother label printers of the QL and PT series. Type the text, see the label at
+      real size, print. No P&#8209;touch Editor, no driver, open source. For macOS and Windows.</p>
     <div class="actions">
-      <a class="btn primary" href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.1/Labelwerk-0.1.0-alpha.1-macos.zip">
+      <a class="btn primary" href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.2/Labelwerk-0.1.0-alpha.2-macos.zip">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-        Download für macOS
+        Download for macOS
+      </a>
+      <a class="btn primary" href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.2/Labelwerk-0.1.0-alpha.2-windows-x64.zip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        Download for Windows
       </a>
       <a class="btn" href="https://github.com/mneuhaus/labelwerk">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>
-        Quelltext
+        Source
       </a>
-      <span class="fine mono">v0.1.0-alpha.1 · macOS 13+ · Apple Silicon &amp; Intel</span>
     </div>
+    <span class="fine mono">v0.1.0-alpha.2 · macOS 13+ (Apple Silicon &amp; Intel) · Windows 10/11 (x64)</span>
     <figure class="shot">
       <picture>
         <source srcset="screenshot-light.png" media="(prefers-color-scheme: light)">
-        <img src="screenshot-dark.png" width="2480" height="1602" alt="Labelwerk mit einem 24-mm-Etikett „Werkstatt / Regal 3 · Fach B&quot; auf der Arbeitsfläche">
+        <img src="screenshot-dark.png" width="2480" height="1602" alt="Labelwerk with a 24 mm label on the work surface">
       </picture>
     </figure>
   </div>
 
-  <section id="funktionen">
-    <div class="label">Funktionen</div>
-    <h2>Alles, was ein Etikett braucht. Nicht mehr.</h2>
-    <p class="lead">Ein Fenster, ein Textfeld, eine Vorschau. Labelwerk liest aus, welcher Drucker angeschlossen ist und
-      welches Band drinsteckt, und stellt sich selbst darauf ein.</p>
+  <section id="features">
+    <div class="label">Features</div>
+    <h2>Everything a label needs. Nothing more.</h2>
+    <p class="lead">One window, one text field, one preview. Labelwerk reads which printer is connected and which tape
+      is loaded, and sets itself up for it.</p>
     <div class="features">
-      <div class="feature"><h3>Vorschau in echter Größe</h3><p>Das Etikett liegt auf einem Zentimeterraster, mit Maß und Schnittkanten. Was du siehst, ist das Layout, das gedruckt wird. „Druckpunkte" zeigt die echten Punkte des Druckkopfs.</p></div>
-      <div class="feature"><h3>Schrift passt sich an</h3><p>Größe automatisch so groß wie möglich oder fest in pt. Erste Zeile als Überschrift, fett, kursiv, Ausrichtung, mitgelieferte Barlow oder jede Systemschrift.</p></div>
-      <div class="feature"><h3>Drucker erkennt sich selbst</h3><p>Modell, Bandbreite, Bandfarbe und Fehler wie „Deckel offen" oder „kein Band eingelegt" kommen direkt vom Gerät. Die Vorschau zeigt das Etikett in der echten Bandfarbe.</p></div>
-      <div class="feature"><h3>Endlosband und Etiketten</h3><p>Die Länge folgt dem Text oder ist fest in mm. Text längs oder quer mit <span class="k">⌘R</span>. Vorgestanzte und runde QL-Etiketten sind genauso dabei.</p></div>
-      <div class="feature"><h3>QR-Code und Rahmen</h3><p>QR-Code mit dem Etikettentext oder eigenem Inhalt, dazu Rahmen und Rand. Ein Klick, kein Dialog.</p></div>
-      <div class="feature"><h3>Nachdrucken in einem Klick</h3><p>Die zuletzt gedruckten Etiketten liegen unten als Miniaturen. <span class="k">⌘P</span> druckt, die Anzahl steht direkt daneben.</p></div>
+      <div class="feature"><h3>Preview at real size</h3><p>The label lies on a centimetre grid, with its length and cut edges. What you see is the layout that gets printed. "Print dots" shows the actual dots of the print head.</p></div>
+      <div class="feature"><h3>Type that fits</h3><p>Size automatically as big as it fits, or fixed in pt. First line as a heading, bold, italic, alignment, bundled Barlow or any system font.</p></div>
+      <div class="feature"><h3>The printer speaks up</h3><p>Model, tape width, tape colour and errors such as "cover open" or "no tape loaded" come straight from the device. The preview shows the label in the real tape colour.</p></div>
+      <div class="feature"><h3>Tape and labels</h3><p>Length follows the text or is fixed in mm. Text along or across the tape with <span class="k">⌘R</span> / <span class="k">Ctrl+R</span>. Die-cut and round QL labels work too.</p></div>
+      <div class="feature"><h3>QR code and frame</h3><p>A QR code with the label text or your own content, plus frame and margin. One click, no dialog.</p></div>
+      <div class="feature"><h3>Reprint in one click</h3><p>Recently printed labels sit at the bottom as thumbnails. <span class="k">⌘P</span> / <span class="k">Ctrl+P</span> prints, the number of copies is right next to it.</p></div>
     </div>
   </section>
 
-  <section id="drucker">
-    <div class="label">Drucker</div>
-    <h2>56 Modelle der QL- und PT-Serie</h2>
-    <p class="lead">Die Modell- und Bänderdaten stammen aus den Gerätedefinitionen von P-touch Editor, das Protokoll je
-      Modell aus Brothers Raster-Referenzen. Wie gut ein Modell geprüft ist, steht offen dabei.</p>
+  <section id="printers">
+    <div class="label">Printers</div>
+    <h2>56 models of the QL and PT series</h2>
+    <p class="lead">Model and tape data come from P&#8209;touch Editor's device definitions, the protocol per model from
+      Brother's raster command references. How well each model is tested is stated openly.</p>
     <div class="levels">
       <div class="level">
-        <div class="tag"><span class="dot" style="background:var(--ok)"></span>Geprüft</div>
-        <div><div class="what">Byte für Byte gegen Brothers eigenen Treiber verglichen</div><div class="models">QL-1100</div></div>
+        <div class="tag"><span class="dot" style="background:var(--ok)"></span>Verified</div>
+        <div><div class="what">compared byte for byte with Brother's own driver</div><div class="models">QL-1100</div></div>
       </div>
       <div class="level">
-        <div class="tag"><span class="dot" style="background:var(--yellow)"></span>Dokumentiert</div>
-        <div><div class="what">nach Brothers Befehlsreferenz für genau dieses Modell; PT-P710BT druckt auf dem echten Gerät</div><div class="models">PT-P710BT · QL-500 · QL-550 · QL-560 · QL-570 · QL-580N · QL-600 · QL-650TD · QL-700 · QL-710W · QL-720NW · QL-800 · QL-810W · QL-820NWB · QL-1050 · QL-1060N · QL-1110NWB · QL-1115NWB · PT-H500 · PT-P700 · PT-E500 · PT-E550W · PT-P750W · PT-P900 · PT-P900W · PT-P950NW · PT-P910BT</div></div>
+        <div class="tag"><span class="dot" style="background:var(--yellow)"></span>Documented</div>
+        <div><div class="what">follows Brother's command reference for exactly this model; the PT-P710BT prints on the real device</div><div class="models">PT-P710BT · QL-500 · QL-550 · QL-560 · QL-570 · QL-580N · QL-600 · QL-650TD · QL-700 · QL-710W · QL-720NW · QL-800 · QL-810W · QL-820NWB · QL-1050 · QL-1060N · QL-1110NWB · QL-1115NWB · PT-H500 · PT-P700 · PT-E500 · PT-E550W · PT-P750W · PT-P900 · PT-P900W · PT-P950NW · PT-P910BT</div></div>
       </div>
       <div class="level">
-        <div class="tag"><span class="dot" style="background:var(--warn)"></span>Angenommen</div>
-        <div><div class="what">gleiche Familie und gleicher Druckkopf wie dokumentierte Modelle</div><div class="models">PT-D410 · PT-D450 · PT-D460BT · PT-D600 · PT-D610BT · PT-D800W · PT-E310BT · PT-E510 · PT-E560BT · PT-E720BT · PT-E800W · PT-E800T · PT-E800TK · PT-E850TKW · PT-E920BT · PT-P300BT · PT-P715eBT · PT-2430PC · PT-2700 · PT-2730</div></div>
+        <div class="tag"><span class="dot" style="background:var(--warn)"></span>Assumed</div>
+        <div><div class="what">same family and print head as documented models</div><div class="models">PT-D410 · PT-D450 · PT-D460BT · PT-D600 · PT-D610BT · PT-D800W · PT-E310BT · PT-E510 · PT-E560BT · PT-E720BT · PT-E800W · PT-E800T · PT-E800TK · PT-E850TKW · PT-E920BT · PT-P300BT · PT-P715eBT · PT-2430PC · PT-2700 · PT-2730</div></div>
       </div>
       <div class="level">
-        <div class="tag"><span class="dot" style="background:var(--off)"></span>Nicht unterstützt</div>
-        <div><div class="what">sprechen ein anderes Protokoll</div><div class="models">PT-9500PC · PT-9600 · PT-9700PC · PT-9800PCN · PT-3600 · PT-18R · PT-18NR · PT-N25BT</div></div>
+        <div class="tag"><span class="dot" style="background:var(--off)"></span>Unsupported</div>
+        <div><div class="what">speak a different protocol</div><div class="models">PT-9500PC · PT-9600 · PT-9700PC · PT-9800PCN · PT-3600 · PT-18R · PT-18NR · PT-N25BT</div></div>
       </div>
     </div>
-    <p class="fine" style="margin-top:16px">Dein Drucker druckt (oder nicht)? Ein <a href="https://github.com/mneuhaus/labelwerk/issues">Issue</a> mit der Ausgabe von <code>labelwerk status --json</code> hilft, ihn auf „geprüft" zu bringen.</p>
+    <p class="fine" style="margin-top:16px">Does your printer print (or not)? An <a href="https://github.com/mneuhaus/labelwerk/issues">issue</a> with the output of <code>labelwerk status --json</code> helps move it to "verified".</p>
   </section>
 
-  <section id="installieren">
-    <div class="label">Installieren</div>
-    <h2>In zwei Minuten am Drucken</h2>
+  <section id="install">
+    <div class="label">Install</div>
+    <h2>Printing in two minutes</h2>
     <div class="cols">
       <div>
         <ol class="steps">
-          <li><a href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.1/Labelwerk-0.1.0-alpha.1-macos.zip">Labelwerk-0.1.0-alpha.1-macos.zip</a> laden, entpacken und nach „Programme" ziehen.</li>
-          <li>Die App ist noch nicht von Apple notarisiert. Beim ersten Start unter Systemeinstellungen → Datenschutz &amp; Sicherheit auf „Dennoch öffnen" klicken, oder im Terminal:<br><code>xattr -dr com.apple.quarantine /Applications/Labelwerk.app</code></li>
-          <li>Drucker per USB anschließen und einschalten. Ein Brother-Treiber ist nicht nötig.</li>
+          <li><b>macOS:</b> <a href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.2/Labelwerk-0.1.0-alpha.2-macos.zip">Labelwerk-0.1.0-alpha.2-macos.zip</a>, unzip, move to Applications. The app is not notarized yet: on first start click "Open Anyway" under System Settings → Privacy &amp; Security, or run<br><code>xattr -dr com.apple.quarantine /Applications/Labelwerk.app</code></li>
+          <li><b>Windows:</b> <a href="https://github.com/mneuhaus/labelwerk/releases/download/v0.1.0-alpha.2/Labelwerk-0.1.0-alpha.2-windows-x64.zip">Labelwerk-0.1.0-alpha.2-windows-x64.zip</a>, unzip, start <code>Labelwerk.exe</code>. It is not code-signed yet: if SmartScreen warns, choose "More info" → "Run anyway".</li>
+          <li>Connect the printer over USB and switch it on. No Brother driver needed. On a PT-P710BT or PT-P750W, Editor Lite must be off (LED dark).</li>
         </ol>
-        <p class="fine">Alpha heißt: Es druckt, aber es fehlen noch Dinge (Netzwerk und Bluetooth, Bilder, Barcodes außer QR, Windows). Alle Versionen: <a href="https://github.com/mneuhaus/labelwerk/releases">Releases</a>.</p>
+        <p class="fine">Alpha means: it prints, but things are missing (network and Bluetooth, images, barcodes other than QR), and Windows printing still needs reports from real hardware. The interface is English, or German on German systems. All versions: <a href="https://github.com/mneuhaus/labelwerk/releases">Releases</a>.</p>
       </div>
       <div>
-        <div class="label">Kommandozeile</div>
-<pre><span class="c"># angeschlossener Drucker und eingelegtes Band</span>
+        <div class="label">Command line</div>
+<pre><span class="c"># connected printer and loaded tape</span>
 labelwerk status
-<span class="c"># Etikett drucken, drei Stück</span>
-labelwerk print -t "M3 Schrauben" --copies 3
-<span class="c"># Vorschau als PNG</span>
-labelwerk render -t "Kabel\nHDMI" --bold -o vorschau.png
-<span class="c"># alle Modelle, alle Bänder eines Modells</span>
+<span class="c"># print a label, three copies</span>
+labelwerk print -t "M3 screws" --copies 3
+<span class="c"># preview as PNG</span>
+labelwerk render -t "Cable\nHDMI" --bold -o preview.png
+<span class="c"># all models, all tapes of one model</span>
 labelwerk models
 labelwerk media --model PT-P710BT</pre>
-        <p class="fine">Die CLI liegt als <span class="mono">labelwerk-cli-…-macos.tar.gz</span> im Release. <span class="mono">--json</span> liefert maschinenlesbare Ausgabe.</p>
+        <p class="fine">The CLI ships as <span class="mono">labelwerk-cli-…</span> in every release. <span class="mono">--json</span> gives machine-readable output.</p>
       </div>
     </div>
   </section>
 
   <footer>
-    <span>Labelwerk · MIT-Lizenz · von <a href="https://github.com/mneuhaus">Marc Neuhaus</a></span>
-    <span>Kein Produkt von Brother. Brother und P-touch sind Marken der Brother Industries, Ltd.</span>
-    <span>Schriften: Barlow, IBM Plex Mono (SIL OFL)</span>
+    <span>Labelwerk · MIT license · by <a href="https://github.com/mneuhaus">Marc Neuhaus</a></span>
+    <span>Not a Brother product. Brother and P&#8209;touch are trademarks of Brother Industries, Ltd.</span>
+    <span>Fonts: Barlow, IBM Plex Mono (SIL OFL)</span>
   </footer>
 </div>
 </body>
