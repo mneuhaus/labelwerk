@@ -459,6 +459,37 @@ mod tests {
         assert!(job.windows(3).any(|w| w == [b'G', 16, 0]));
     }
 
+    /// A batch of different labels goes out as one job: cut after every label, fed and cut only after the
+    /// last one (Raster Command Reference PT-E550W/P750W/P710BT, 5.1: 0C between pages, 1A at the end). So
+    /// only the first label carries the blank tape between print head and cutter.
+    #[test]
+    fn batch_is_one_job_cut_after_every_label() {
+        let model = p710bt();
+        let media = model.media_by_key("24").unwrap();
+        let pages: Vec<Bitmap> = [120u32, 300, 64]
+            .iter()
+            .enumerate()
+            .map(|(i, &lines)| {
+                let mut page = Bitmap::new(media.print_width, lines);
+                page.set(i as u32 * 10, lines - 1, true);
+                page
+            })
+            .collect();
+        let refs: Vec<&Bitmap> = pages.iter().collect();
+        let decoded = decode_job(model, &encode_job(model, media, &refs, &PrintOptions::default()).unwrap()).unwrap();
+        let commands = || decoded.iter().flat_map(|p| &p.commands);
+        assert_eq!(commands().filter(|c| c.as_slice() == INITIALIZE).count(), 1, "initialized once");
+        assert_eq!(decoded.iter().map(|p| p.terminator).collect::<Vec<_>>(), [0x0C, 0x0C, 0x1A]);
+        for (i, (page, bitmap)) in decoded.iter().zip(&pages).enumerate() {
+            let info = page.commands.iter().find(|c| c.starts_with(&[ESC, b'i', b'z'])).unwrap();
+            assert_eq!(u32::from_le_bytes(info[7..11].try_into().unwrap()), bitmap.height);
+            assert_eq!(info[11], if i == 0 { 0 } else { 1 }, "n9: starting page 0, other pages 1");
+            assert!(page.commands.contains(&vec![ESC, b'i', b'M', 0x40]), "auto cut on label {i}");
+            assert!(page.commands.contains(&vec![ESC, b'i', b'K', 0x08]), "no chain printing: the last label comes out");
+            assert_eq!(lines_to_bitmap(model, media, &page.lines), *bitmap);
+        }
+    }
+
     /// Raster Command Reference PT-E550W/P750W/P710BT, 2.1: "printing 100 mm on 24-mm-wide tape with the
     /// 180 dpi model" -> ESC i z with 0x2AA (682) lines, and 2 mm margins = 14 dots.
     #[test]

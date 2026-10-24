@@ -18,8 +18,9 @@ use labelwerk_core::media::dots_to_mm;
 use labelwerk_core::bitmap::encode_png_rgba;
 use labelwerk_core::render::{PreviewStyle, preview_png};
 use labelwerk_core::model::Support;
-use labelwerk_core::{Align, Direction, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
+use labelwerk_core::{Align, Bitmap, Direction, Family, Kind, Label, Media, Model, PrintOptions, Rendered, Renderer, models};
 
+use crate::batch::Batch;
 use crate::printer::{self, PrinterState};
 use crate::{i18n, tape, theme, tr};
 use crate::store::{self, HistoryEntry, Saved};
@@ -114,6 +115,52 @@ fn model_names() -> Vec<SharedString> {
     models().iter().map(|m| SharedString::from(m.name.clone())).collect()
 }
 
+/// A small preview for the history and batch strips.
+#[derive(Clone)]
+struct Thumb {
+    image: Arc<Image>,
+    /// width / height
+    aspect: f32,
+    /// The label has a warning (text does not fit, ...).
+    warning: bool,
+}
+
+impl Thumb {
+    fn of(r: &Rendered) -> Self {
+        let style = PreviewStyle { outline: None, ..PreviewStyle::default() };
+        Thumb {
+            image: Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(r, &style))),
+            aspect: r.geometry.label_w as f32 / r.geometry.label_h.max(1) as f32,
+            warning: !r.warnings.is_empty(),
+        }
+    }
+}
+
+/// A batch entry rendered for the current model and medium.
+struct BatchView {
+    label: Label,
+    page: Bitmap,
+    thumb: Thumb,
+}
+
+/// "1 label", "3 labels", in the UI language.
+fn labels_count(n: usize) -> String {
+    match (i18n::german(), n) {
+        (true, 1) => "1 Etikett".into(),
+        (true, n) => format!("{n} Etiketten"),
+        (false, 1) => "1 label".into(),
+        (false, n) => format!("{n} labels"),
+    }
+}
+
+fn text_placeholder(batch_mode: bool) -> &'static str {
+    if batch_mode {
+        tr!("Label text, Enter adds it to the batch", "Text des Etiketts, Enter legt es in den Stapel")
+    } else {
+        tr!("Label text", "Text des Etiketts")
+    }
+}
+
 pub struct LabelApp {
     renderer: Renderer,
     label: Label,
@@ -121,6 +168,13 @@ pub struct LabelApp {
     media: &'static Media,
     follow_printer: bool,
     copies: u32,
+    /// Enter puts the label into `batch`; Print prints the whole batch as one job.
+    batch_mode: bool,
+    batch: Batch,
+    /// `batch.labels` rendered, in the same order, for `batch_views_for`.
+    batch_views: Vec<BatchView>,
+    batch_views_for: Option<(&'static str, u16)>,
+    batch_scroll: ScrollHandle,
     history: Vec<HistoryEntry>,
     printer: PrinterState,
     /// Last model and roll the printer reported; the editor follows changes of them, not every poll.
@@ -133,8 +187,8 @@ pub struct LabelApp {
     show_dots: bool,
     /// Pixels per printer dot the smooth preview was drawn with.
     preview_k: u32,
-    /// Mini previews of `history` (image, width / height).
-    thumbs: Vec<(Arc<Image>, f32)>,
+    /// Mini previews of `history`.
+    thumbs: Vec<Thumb>,
     text: Entity<TextareaState>,
     font: Entity<SelectState<SearchableVec<SharedString>>>,
     model_select: Entity<SelectState<SearchableVec<SharedString>>>,
@@ -162,7 +216,8 @@ impl LabelApp {
         let text = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
-                .placeholder(tr!("Label text", "Text des Etiketts"))
+                .submit_on_enter(saved.batch_mode)
+                .placeholder(text_placeholder(saved.batch_mode))
                 .default_value(label.text.clone())
         });
         let families: Vec<SharedString> = renderer.families().iter().map(|f| SharedString::from(f.clone())).collect();
@@ -195,11 +250,14 @@ impl LabelApp {
         });
 
         let mut subs = vec![
-            cx.subscribe_in(&text, window, |this, state, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::Change) {
+            cx.subscribe_in(&text, window, |this, state, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
                     this.label.text = state.read(cx).value().to_string();
                     this.changed(window, cx);
                 }
+                // in batch mode Enter does not start a new line (Shift+Enter does), it adds the label
+                InputEvent::PressEnter { shift: false, .. } if this.batch_mode => this.add_to_batch(window, cx),
+                _ => {}
             }),
             cx.subscribe_in(&font, window, |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
                 let SelectEvent::Confirm(Some(family)) = ev else { return };
@@ -246,6 +304,11 @@ impl LabelApp {
             media,
             follow_printer: saved.follow_printer,
             copies: saved.copies.max(1),
+            batch_mode: saved.batch_mode,
+            batch: saved.batch,
+            batch_views: Vec::new(),
+            batch_views_for: None,
+            batch_scroll: ScrollHandle::new(),
             history: saved.history,
             printer: PrinterState::Searching,
             seen_model: None,
@@ -292,6 +355,8 @@ impl LabelApp {
             media: self.media.key(),
             follow_printer: self.follow_printer,
             copies: self.copies,
+            batch_mode: self.batch_mode,
+            batch: self.batch.clone(),
             history: self.history.clone(),
         }
     }
@@ -321,7 +386,90 @@ impl LabelApp {
         self.size.update(cx, |s, cx| s.set_placeholder(size_hint, window, cx));
         self.length.update(cx, |s, cx| s.set_placeholder(length_hint, window, cx));
         self.rendered = Some(rendered);
+        self.refresh_batch();
         cx.notify();
+    }
+
+    /// Render the batch entries that are not rendered for this model and medium yet.
+    fn refresh_batch(&mut self) {
+        let key = Some((self.model.name.as_str(), self.media.id));
+        let mut old = std::mem::take(&mut self.batch_views);
+        if self.batch_views_for != key {
+            old.clear();
+            self.batch_views_for = key;
+        }
+        for label in self.batch.labels.clone() {
+            let view = match old.iter().position(|v| v.label == label) {
+                Some(i) => old.swap_remove(i),
+                None => {
+                    let r = self.renderer.render(&label, self.model, self.media);
+                    BatchView { thumb: Thumb::of(&r), page: r.page, label }
+                }
+            };
+            self.batch_views.push(view);
+        }
+    }
+
+    /// Put the editor's label into the batch and clear the editor for the next one.
+    fn add_to_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.printing {
+            return;
+        }
+        let Some(at) = self.batch.add(self.label.clone()) else { return };
+        // its rendering is the one on the mat; no need to draw it again
+        if let Some(r) = &self.rendered {
+            self.batch_views.push(BatchView { label: self.label.clone(), page: r.page.clone(), thumb: Thumb::of(r) });
+        }
+        self.set_text("", window, cx);
+        self.changed(window, cx);
+        self.batch_scroll.scroll_to_item(at);
+    }
+
+    /// Take a batch entry back into the editor; Enter puts it back at its place.
+    fn edit_batch_entry(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.printing {
+            return;
+        }
+        if let Some(label) = self.batch.edit(i, self.label.clone()) {
+            self.load_label(label, window, cx);
+            self.text.update(cx, |s, cx| s.focus(window, cx));
+        }
+        self.changed(window, cx);
+    }
+
+    fn remove_batch_entry(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.printing {
+            return;
+        }
+        self.batch.remove(i);
+        self.refresh_batch();
+        store::save(&self.saved());
+        cx.notify();
+    }
+
+    fn clear_batch(&mut self, cx: &mut Context<Self>) {
+        if self.printing {
+            return;
+        }
+        self.batch = Batch::default();
+        self.refresh_batch();
+        store::save(&self.saved());
+        cx.notify();
+    }
+
+    fn set_batch_mode(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.batch_mode = on;
+        self.text.update(cx, |s, cx| {
+            s.set_submit_on_enter(on, cx);
+            s.set_placeholder(text_placeholder(on), window, cx);
+        });
+        store::save(&self.saved());
+        cx.notify();
+    }
+
+    fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.text.update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
+        self.label.text = text.to_string();
     }
 
     /// Switch to another printer model, keeping the label; picks `media` or the model's first medium.
@@ -334,10 +482,18 @@ impl LabelApp {
         let name = SharedString::from(model.name.clone());
         self.model_select.update(cx, |s, cx| s.set_selected_value(&name, window, cx));
         self.media = media;
-        self.label.direction = None;
+        self.reset_directions();
         let key = SharedString::from(media.key());
         self.media_select.update(cx, |s, cx| s.set_selected_value(&key, window, cx));
         self.changed(window, cx);
+    }
+
+    /// A direction picked for one medium rarely suits another.
+    fn reset_directions(&mut self) {
+        self.label.direction = None;
+        for label in &mut self.batch.labels {
+            label.direction = None;
+        }
     }
 
     /// Render the history entries small, as they were printed.
@@ -346,10 +502,7 @@ impl LabelApp {
         for entry in &self.history {
             let model = Model::by_name(&entry.model).unwrap_or(self.model);
             let media = model.media_by_key(&entry.media).unwrap_or(&model.media[0]);
-            let r = self.renderer.render(&entry.label, model, media);
-            let style = PreviewStyle { outline: None, ..PreviewStyle::default() };
-            let aspect = r.geometry.label_w as f32 / r.geometry.label_h.max(1) as f32;
-            thumbs.push((Arc::new(Image::from_bytes(ImageFormat::Png, preview_png(&r, &style))), aspect));
+            thumbs.push(Thumb::of(&self.renderer.render(&entry.label, model, media)));
         }
         self.thumbs = thumbs;
     }
@@ -358,9 +511,8 @@ impl LabelApp {
         if self.media.id == media.id {
             return;
         }
-        // A direction picked for one medium rarely suits another
-        self.label.direction = None;
         self.media = media;
+        self.reset_directions();
         self.changed(window, cx);
     }
 
@@ -429,7 +581,14 @@ impl LabelApp {
     }
 
     fn load_history(&mut self, entry: HistoryEntry, window: &mut Window, cx: &mut Context<Self>) {
-        let label = entry.label.clone();
+        self.load_label(entry.label.clone(), window, cx);
+        let model = Model::by_name(&entry.model).unwrap_or(self.model);
+        let media = model.media_by_key(&entry.media);
+        self.set_model(model, media, window, cx);
+    }
+
+    /// Show `label` in the editor fields.
+    fn load_label(&mut self, label: Label, window: &mut Window, cx: &mut Context<Self>) {
         self.text.update(cx, |s, cx| s.set_value(label.text.clone(), window, cx));
         self.qr_text.update(cx, |s, cx| s.set_value(label.qr_content.clone(), window, cx));
         let opt = |v: Option<f32>| v.map(mm).unwrap_or_default();
@@ -439,9 +598,6 @@ impl LabelApp {
         let family = SharedString::from(label.font.clone());
         self.font.update(cx, |s, cx| s.set_selected_value(&family, window, cx));
         self.label = label;
-        let model = Model::by_name(&entry.model).unwrap_or(self.model);
-        let media = model.media_by_key(&entry.media);
-        self.set_model(model, media, window, cx);
     }
 
     /// Why printing is not possible right now, if it is not.
@@ -449,8 +605,10 @@ impl LabelApp {
         if self.printing {
             return Some(tr!("Printing…", "Druckt gerade …").to_string());
         }
-        let empty = self.label.text.trim().is_empty() && !(self.label.qr && !self.label.qr_data().is_empty());
-        if empty {
+        if self.batch_mode && self.batch.labels.is_empty() && self.label.is_empty() {
+            return Some(tr!("The batch is empty", "Der Stapel ist leer").to_string());
+        }
+        if !self.batch_mode && self.label.is_empty() {
             return Some(tr!("The label is empty", "Das Etikett ist leer").to_string());
         }
         if self.model.protocol.support == Support::Unsupported {
@@ -493,7 +651,19 @@ impl LabelApp {
             return;
         }
         let Some(rendered) = &self.rendered else { return };
-        let pages = vec![rendered.page.clone(); self.copies as usize];
+        let editor_label = self.label.clone();
+        let in_editor = !editor_label.is_empty();
+        // a batch is one job: the printer cuts between the labels and feeds the blank start of the tape once
+        let (labels, pages) = if self.batch_mode {
+            let mut pages: Vec<Bitmap> = self.batch_views.iter().map(|v| v.page.clone()).collect();
+            if in_editor {
+                pages.insert(self.batch.slot(), rendered.page.clone());
+            }
+            (self.batch.to_print(&editor_label), pages)
+        } else {
+            (vec![editor_label.clone()], vec![rendered.page.clone(); self.copies as usize])
+        };
+        let batch = self.batch_mode;
         let model = self.model;
         let media = self.media;
         let opts = PrintOptions::default();
@@ -501,8 +671,7 @@ impl LabelApp {
             PrinterState::Busy { queue: Some(q), .. } => Some(q.clone()),
             _ => None,
         };
-        let entry = HistoryEntry { label: self.label.clone(), model: model.name.clone(), media: media.key() };
-        let copies = self.copies;
+        let total = pages.len();
         self.printing = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -517,28 +686,45 @@ impl LabelApp {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.printing = false;
+                let printed = match &result {
+                    Ok(_) => total,
+                    Err(f) => f.printed.min(total),
+                };
+                if batch {
+                    // the batch was locked while printing, so its slots still match `labels`
+                    if this.batch.printed(in_editor, printed) && this.label == editor_label {
+                        this.set_text("", window, cx);
+                    }
+                    this.changed(window, cx);
+                }
+                let printed_labels = if batch { &labels[..printed] } else { &labels[..printed.min(1)] };
+                for label in printed_labels {
+                    store::remember(&mut this.history, HistoryEntry { label: label.clone(), model: model.name.clone(), media: media.key() });
+                }
+                if !printed_labels.is_empty() {
+                    this.refresh_thumbs();
+                    store::save(&this.saved());
+                }
                 match result {
                     Ok(confirmed) => {
-                        store::remember(&mut this.history, entry);
-                        this.refresh_thumbs();
-                        store::save(&this.saved());
-                        let what = if i18n::german() {
-                            if copies == 1 { "1 Etikett".to_string() } else { format!("{copies} Etiketten") }
-                        } else if copies == 1 {
-                            "1 label".to_string()
-                        } else {
-                            format!("{copies} labels")
-                        };
                         let title = if confirmed { tr!("Printed", "Gedruckt") } else { tr!("Sent", "Gesendet") };
                         let joiner = tr!("on", "auf");
                         window.push_notification(
-                            Notification::success(format!("{what} {joiner} {}", media_name(media))).title(title),
+                            Notification::success(format!("{} {joiner} {}", labels_count(total), media_name(media))).title(title),
                             cx,
                         );
                     }
-                    Err(e) => {
+                    Err(f) => {
+                        let mut message = printer::localize(&format!("{:#}", f.error));
+                        if batch && printed > 0 {
+                            message += &if i18n::german() {
+                                format!(" ({printed} von {total} gedruckt, der Rest bleibt im Stapel)")
+                            } else {
+                                format!(" ({printed} of {total} printed, the rest stays in the batch)")
+                            };
+                        }
                         window.push_notification(
-                            Notification::error(printer::localize(&format!("{e:#}"))).title(tr!("Print failed", "Druck fehlgeschlagen")),
+                            Notification::error(message).title(tr!("Print failed", "Druck fehlgeschlagen")),
                             cx,
                         );
                     }
@@ -1049,32 +1235,157 @@ impl LabelApp {
             )
     }
 
-    fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// One label in a strip: a small picture of it, clickable.
+    fn thumb_tile(id: ElementId, thumb: &Thumb, tooltip: String, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let h = 38.;
+        div()
+            .id(id)
+            .flex_none()
+            .h(px(h))
+            .w(px((h * thumb.aspect).clamp(24., 150.)))
+            .rounded(px(3.))
+            .border_1()
+            .border_color(if thumb.warning { theme.warning } else { theme.border })
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(|s| s.border_color(theme.ring))
+            .child(img(thumb.image.clone()).size_full())
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(w, cx))
+    }
+
+    fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let muted = cx.theme().muted_foreground;
+        let thumbs: Vec<_> = self
+            .history
+            .iter()
+            .zip(&self.thumbs)
+            .take(12)
+            .enumerate()
+            .map(|(i, (entry, thumb))| {
+                let e = entry.clone();
+                Self::thumb_tile(("history", i).into(), thumb, entry.title(), cx)
+                    .on_click(cx.listener(move |this, _, window, cx| this.load_history(e.clone(), window, cx)))
+            })
+            .collect();
+        h_flex()
+            .id("history-strip")
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .overflow_x_scroll()
+            .when(!self.history.is_empty(), |d| d.child(div().pr_1().child(Self::eyebrow(tr!("Recently printed", "Zuletzt"), cx))))
+            .when(self.history.is_empty(), |d| {
+                d.child(div().text_sm().text_color(muted).child(tr!(
+                    "Printed labels appear here to reprint.",
+                    "Gedruckte Etiketten erscheinen hier zum Nachdrucken."
+                )))
+            })
+            .children(thumbs)
+    }
+
+    /// The batch: its entries, and the label in the editor (dashed) where Enter will put it.
+    fn render_batch(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let blocked = self.blocker().is_some();
-        let label = if self.printing { tr!("Printing…", "Druckt …") } else { tr!("Print", "Drucken") };
-        let thumbs = self.history.iter().zip(&self.thumbs).take(12).enumerate().map(|(i, (entry, thumb))| {
-            let e = entry.clone();
-            let (image, aspect) = thumb.clone();
+        let mut tiles: Vec<AnyElement> = Vec::new();
+        for (i, view) in self.batch_views.iter().enumerate() {
+            let tip = format!("{} · {}", store::title(&view.label), tr!("click to edit", "zum Bearbeiten klicken"));
+            let remove = div()
+                .id(("batch-remove", i))
+                .absolute()
+                .top(px(-6.))
+                .right(px(-6.))
+                .size(px(16.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.foreground)
+                .text_color(theme.background)
+                .cursor_pointer()
+                .invisible()
+                .group_hover("batch-tile", |s| s.visible())
+                .child(Icon::new(IconName::Close).size(px(10.)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.remove_batch_entry(i, cx);
+                }));
+            let tile = Self::thumb_tile(("batch", i).into(), &view.thumb, tip, cx)
+                .on_click(cx.listener(move |this, _, window, cx| this.edit_batch_entry(i, window, cx)));
+            tiles.push(div().relative().flex_none().group("batch-tile").child(tile).child(remove).into_any_element());
+        }
+        if let (false, Some(r), Some(preview)) = (self.label.is_empty(), &self.rendered, &self.preview) {
             let h = 38.;
-            div()
-                .id(("history", i))
+            let aspect = r.geometry.label_w as f32 / r.geometry.label_h.max(1) as f32;
+            let tip = tr!("In the editor: Enter adds it here", "Im Editor: Enter legt es hier ab").to_string();
+            let pending = div()
+                .id("batch-pending")
                 .flex_none()
                 .h(px(h))
                 .w(px((h * aspect).clamp(24., 150.)))
                 .rounded(px(3.))
                 .border_1()
-                .border_color(theme.border)
+                .border_dashed()
+                .border_color(theme.ring)
                 .overflow_hidden()
-                .cursor_pointer()
-                .hover(|s| s.border_color(theme.ring))
-                .child(img(image).size_full())
-                .tooltip({
-                    let t = entry.title();
-                    move |w, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(w, cx)
-                })
-                .on_click(cx.listener(move |this, _, window, cx| this.load_history(e.clone(), window, cx)))
-        });
+                .opacity(0.75)
+                .child(img(preview.clone()).size_full())
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+            tiles.insert(self.batch.slot().min(tiles.len()), pending.into_any_element());
+        }
+        let count = self.batch.labels.len() + usize::from(!self.label.is_empty());
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .child(div().pr_1().flex_none().child(Self::eyebrow(format!("{} · {count}", tr!("Batch", "Stapel")), cx)))
+            .child(
+                h_flex()
+                    .id("batch-strip")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .pt(px(6.))
+                    .pr(px(6.))
+                    .gap_2()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.batch_scroll)
+                    .when(tiles.is_empty(), |d| {
+                        d.child(div().text_sm().text_color(theme.muted_foreground).child(tr!(
+                            "Type a label and press Enter to add it. Shift+Enter starts a new line.",
+                            "Etikett eingeben, Enter legt es in den Stapel. Umschalt+Enter macht eine neue Zeile."
+                        )))
+                    })
+                    .children(tiles),
+            )
+            .when(!self.batch.labels.is_empty(), |d| {
+                d.child(
+                    Button::new("clear-batch")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Trash)
+                        .tooltip(tr!("Empty the batch", "Stapel leeren"))
+                        .disabled(self.printing)
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_batch(cx))),
+                )
+            })
+    }
+
+    fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let blocked = self.blocker().is_some();
+        let label = match (self.printing, self.batch_mode) {
+            (true, _) => tr!("Printing…", "Druckt …").to_string(),
+            (false, true) => {
+                let n = self.batch.labels.len() + usize::from(!self.label.is_empty());
+                if i18n::german() { format!("{} drucken", labels_count(n)) } else { format!("Print {}", labels_count(n)) }
+            }
+            (false, false) => tr!("Print", "Drucken").to_string(),
+        };
+        let strip = if self.batch_mode { self.render_batch(cx).into_any_element() } else { self.render_history(cx).into_any_element() };
         h_flex()
             .h(px(BAR_H))
             .flex_none()
@@ -1084,25 +1395,29 @@ impl LabelApp {
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.background)
+            .child(strip)
             .child(
-                h_flex()
-                    .id("history-strip")
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .overflow_x_scroll()
-                    .when(!self.history.is_empty(), |d| d.child(div().pr_1().child(Self::eyebrow(tr!("Recently printed", "Zuletzt"), cx))))
-                    .when(self.history.is_empty(), |d| {
-                        d.child(div().text_sm().text_color(theme.muted_foreground).child(tr!(
-                            "Printed labels appear here to reprint.",
-                            "Gedruckte Etiketten erscheinen hier zum Nachdrucken."
-                        )))
-                    })
-                    .children(thumbs),
+                div()
+                    .id("batch-mode")
+                    .flex_none()
+                    .child(
+                        Switch::new("batch-switch")
+                            .checked(self.batch_mode)
+                            .label(tr!("Batch", "Stapel"))
+                            .on_click(cx.listener(|this, on: &bool, window, cx| this.set_batch_mode(*on, window, cx))),
+                    )
+                    .tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tr!(
+                            "Collect labels with Enter and print them in one go: cut apart, with the blank start of the tape only once",
+                            "Etiketten mit Enter sammeln und in einem Rutsch drucken: einzeln geschnitten, der leere Bandanfang nur einmal"
+                        ))
+                        .build(w, cx)
+                    }),
             )
-            .child(div().text_sm().text_color(theme.muted_foreground).child(tr!("Copies", "Anzahl")))
-            .child(div().w(px(116.)).child(NumberInput::new(&self.copies_input)))
+            .when(!self.batch_mode, |d| {
+                d.child(div().text_sm().text_color(theme.muted_foreground).child(tr!("Copies", "Anzahl")))
+                    .child(div().w(px(116.)).child(NumberInput::new(&self.copies_input)))
+            })
             .child(
                 Button::new("print")
                     .primary()

@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use labelwerk_core::protocol::{decode_job, lines_to_bitmap};
 use labelwerk_core::render::preview_png;
 use labelwerk_core::transport::{self, PrintEvent, Probe, UsbPrinter};
-use labelwerk_core::{Align, Direction, Label, Media, Model, PrintOptions, Renderer, encode_job, models};
+use labelwerk_core::{Align, Bitmap, Direction, Label, Media, Model, PrintOptions, Rendered, Renderer, encode_job, models};
 
 #[derive(Parser)]
 #[command(name = "labelwerk", version, about = "Labels for Brother QL and PT label printers")]
@@ -34,21 +34,22 @@ enum Command {
     },
     /// Show connected printers and the loaded media.
     Status,
-    /// Render a label to a preview PNG (and optionally the raw printer job).
+    /// Render a label to a preview PNG (and optionally the raw printer job, with every `--text` as one label).
     Render {
         #[command(flatten)]
         label: LabelArgs,
-        /// Preview PNG of the whole label.
+        /// Preview PNG of the whole label (the first one when there are several).
         #[arg(long, short)]
         out: PathBuf,
         /// Also write the printer job (raw bytes).
         #[arg(long)]
         job: Option<PathBuf>,
     },
-    /// Print a label.
+    /// Print a label; several `--text` print a batch in one job, cut apart.
     Print {
         #[command(flatten)]
         label: LabelArgs,
+        /// Copies of each label.
         #[arg(long, default_value_t = 1)]
         copies: u32,
         /// Send through this system print queue (raw, no status) instead of USB.
@@ -69,9 +70,9 @@ enum Command {
 
 #[derive(Args)]
 struct LabelArgs {
-    /// Label text; "\n" starts a new line.
-    #[arg(long, short, default_value = "")]
-    text: String,
+    /// Label text; "\n" starts a new line. Repeat for several labels, printed in one job.
+    #[arg(long, short)]
+    text: Vec<String>,
     /// Media key ("62", "62x29", "d24", "24", "hs5.8"); defaults to what the printer has loaded.
     #[arg(long, short)]
     media: Option<String>,
@@ -110,7 +111,13 @@ struct LabelArgs {
 }
 
 impl LabelArgs {
-    fn label(&self, media: &Media) -> Result<Label> {
+    /// One label per `--text` (one empty label without any, e.g. for a QR code only).
+    fn labels(&self, media: &Media) -> Result<Vec<Label>> {
+        let texts = if self.text.is_empty() { vec![String::new()] } else { self.text.clone() };
+        texts.iter().map(|t| self.label(t, media)).collect()
+    }
+
+    fn label(&self, text: &str, media: &Media) -> Result<Label> {
         let align = match self.align.as_str() {
             "left" => Align::Left,
             "center" => Align::Center,
@@ -119,7 +126,7 @@ impl LabelArgs {
         };
         let natural = Direction::default_for(media);
         Ok(Label {
-            text: self.text.replace("\\n", "\n"),
+            text: text.replace("\\n", "\n"),
             font: self.font.clone().unwrap_or_default(),
             bold: self.bold,
             italic: self.italic,
@@ -282,10 +289,12 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Render { label, out, job } => {
             let (model, media) = pick_model_and_media(label.model.as_deref(), label.media.as_deref())?;
             let mut renderer = Renderer::new();
-            let rendered = renderer.render(&label.label(media)?, model, media);
-            std::fs::write(out, preview_png(&rendered, &Default::default())).with_context(|| format!("writing {}", out.display()))?;
+            let all: Vec<Rendered> = label.labels(media)?.iter().map(|l| renderer.render(l, model, media)).collect();
+            let rendered = &all[0];
+            std::fs::write(out, preview_png(rendered, &Default::default())).with_context(|| format!("writing {}", out.display()))?;
             if let Some(job_path) = job {
-                std::fs::write(job_path, encode_job(model, media, &[&rendered.page], &PrintOptions::default())?)?;
+                let pages: Vec<&Bitmap> = all.iter().map(|r| &r.page).collect();
+                std::fs::write(job_path, encode_job(model, media, &pages, &PrintOptions::default())?)?;
             }
             let (w_mm, h_mm) = rendered.geometry.label_mm();
             if cli.json {
@@ -313,10 +322,10 @@ fn run(cli: &Cli) -> Result<()> {
                     .into_iter()
                     .find(|q| &q.name == name)
                     .ok_or_else(|| NotReady(format!("no supported system queue named {name:?}")))?;
-                let rendered = renderer.render(&label.label(media)?, model, media);
-                let pages = vec![&rendered.page; *copies as usize];
+                let all = render_all(&mut renderer, &label.labels(media)?, model, media);
+                let pages = pages_of(&all, *copies);
                 transport::print_system_queue(&queue, model, media, &pages, &opts)?;
-                report(cli, &format!("sent {copies} label(s) to {}", queue.name));
+                report(cli, &format!("sent {} label(s) to {}", pages.len(), queue.name));
                 return Ok(());
             }
             let mut printer = open_printer()?;
@@ -334,11 +343,8 @@ fn run(cli: &Cli) -> Result<()> {
                 transport::check_ready(status, model, media).map_err(|e| NotReady(format!("{e:#}")))?;
             }
             let mut confirmed = true;
-            let rendered = renderer.render(&label.label(media)?, model, media);
-            for w in &rendered.warnings {
-                eprintln!("warning: {w}");
-            }
-            let pages = vec![&rendered.page; *copies as usize];
+            let all = render_all(&mut renderer, &label.labels(media)?, model, media);
+            let pages = pages_of(&all, *copies);
             transport::print_usb(&mut printer, model, media, &pages, &opts, |event| {
                 if !cli.json {
                     match event {
@@ -352,7 +358,7 @@ fn run(cli: &Cli) -> Result<()> {
                 }
             })?;
             let verb = if confirmed { "printed" } else { "sent (the printer cannot confirm)" };
-            report(cli, &format!("{verb} {copies} label(s) on {} {}", model.name, media.label()));
+            report(cli, &format!("{verb} {} label(s) on {} {}", pages.len(), model.name, media.label()));
         }
         Command::Decode { job, model, media, out } => {
             let model = model_by_name(model)?;
@@ -365,6 +371,25 @@ fn run(cli: &Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Render every label, warning about the ones that do not come out as designed.
+fn render_all(renderer: &mut Renderer, labels: &[Label], model: &Model, media: &Media) -> Vec<Rendered> {
+    labels
+        .iter()
+        .map(|l| {
+            let r = renderer.render(l, model, media);
+            for w in &r.warnings {
+                eprintln!("warning: {w} ({:?})", l.text);
+            }
+            r
+        })
+        .collect()
+}
+
+/// The pages of one job: each label `copies` times, in order.
+fn pages_of(all: &[Rendered], copies: u32) -> Vec<&Bitmap> {
+    all.iter().flat_map(|r| std::iter::repeat_n(&r.page, copies as usize)).collect()
 }
 
 fn report(cli: &Cli, message: &str) {

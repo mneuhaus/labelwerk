@@ -1,9 +1,11 @@
-//! Remembered state: the label being edited, settings and recently printed labels.
+//! Remembered state: the label being edited, settings, the batch and recently printed labels.
 
 use std::path::PathBuf;
 
 use labelwerk_core::Label;
 use serde::{Deserialize, Serialize};
+
+use crate::batch::Batch;
 
 pub const HISTORY_LEN: usize = 30;
 
@@ -18,6 +20,9 @@ pub struct Saved {
     /// Switch to the roll the printer reports whenever it changes.
     pub follow_printer: bool,
     pub copies: u32,
+    /// Enter puts the label into the batch instead of starting a new line.
+    pub batch_mode: bool,
+    pub batch: Batch,
     pub history: Vec<HistoryEntry>,
 }
 
@@ -29,6 +34,8 @@ impl Default for Saved {
             media: "62".into(),
             follow_printer: true,
             copies: 1,
+            batch_mode: false,
+            batch: Batch::default(),
             history: Vec::new(),
         }
     }
@@ -44,9 +51,14 @@ pub struct HistoryEntry {
 
 impl HistoryEntry {
     pub fn title(&self) -> String {
-        let first = self.label.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        if first.is_empty() { crate::tr!("(QR code only)", "(nur QR-Code)").to_string() } else { first.to_string() }
+        title(&self.label)
     }
+}
+
+/// A label in one line: its first line of text.
+pub fn title(label: &Label) -> String {
+    let first = label.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if first.is_empty() { crate::tr!("(QR code only)", "(nur QR-Code)").to_string() } else { first.to_string() }
 }
 
 fn path() -> Option<PathBuf> {

@@ -17,6 +17,9 @@ Website: <https://mneuhaus.github.io/labelwerk/>
 - Extras: QR code (label text or own content), frame, margin
 - The printer is detected over USB (model, loaded tape or labels including the tape colour, errors such as "cover
   open"), and the app adjusts itself to it
+- Batch: switch on "Batch", type a label, press Enter, type the next one (Shift+Enter starts a new line). Print
+  sends them all as one job: the printer cuts between the labels and feeds the blank start of the tape only once,
+  instead of once per label. Click a collected label to fix it; it goes back to its place.
 - "Recently printed" for quick reprints; the state survives a restart
 - ⌘P / Ctrl+P prints
 
@@ -63,6 +66,7 @@ labelwerk models                         # every known model with its support le
 labelwerk media --model PT-P710BT        # tapes/labels of one model
 labelwerk render -t "Cable\nHDMI" --bold -o preview.png [--job job.bin]
 labelwerk print  -t "M3 screws" --copies 3
+labelwerk print  -t "M3" -t "M4" -t "M5"   # a batch: one job, cut apart
 labelwerk decode job.bin --model PT-P710BT --media 24 -o job.png
 ```
 

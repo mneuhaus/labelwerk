@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use labelwerk_core::model::Support;
 use labelwerk_core::transport::{self, PrintEvent, Probe, SystemQueue, UsbPrinter};
 use labelwerk_core::{Bitmap, Media, Model, PrintOptions};
@@ -101,20 +101,33 @@ pub fn poll() -> PrinterState {
     }
 }
 
+/// A print that went wrong after `printed` labels came out of the printer.
+pub struct Failed {
+    pub error: anyhow::Error,
+    pub printed: usize,
+}
+
+impl From<anyhow::Error> for Failed {
+    fn from(error: anyhow::Error) -> Self {
+        Self { error, printed: 0 }
+    }
+}
+
 /// Print over USB, checking printer and media first. Blocking. `Ok(false)`: sent, but the model cannot confirm.
-pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap>, opts: PrintOptions) -> Result<bool> {
+pub fn print_usb(model: &'static Model, media: &'static Media, pages: Vec<Bitmap>, opts: PrintOptions) -> Result<bool, Failed> {
     let _guard = USB.lock().map_err(|_| anyhow!(tr!("USB lock poisoned", "USB-Sperre beschädigt")))?;
     let devices = transport::list_usb()?;
     let device = devices.first().ok_or_else(|| anyhow!(tr!("No printer found on USB", "Kein Drucker an USB gefunden")))?;
     let mut printer = UsbPrinter::open(device)?;
     let refs: Vec<&Bitmap> = pages.iter().collect();
     let mut confirmed = true;
-    transport::print_usb(&mut printer, model, media, &refs, &opts, |event| {
-        if event == PrintEvent::Unconfirmed {
-            confirmed = false;
-        }
+    let mut printed = 0;
+    transport::print_usb(&mut printer, model, media, &refs, &opts, |event| match event {
+        PrintEvent::Unconfirmed => confirmed = false,
+        PrintEvent::Printing { done, .. } => printed = done,
+        _ => {}
     })
-    .map_err(|e| anyhow!(localize(&format!("{e:#}"))))?;
+    .map_err(|e| Failed { error: anyhow!(localize(&format!("{e:#}"))), printed })?;
     Ok(confirmed)
 }
 
@@ -124,7 +137,7 @@ pub fn print_queue(
     media: &'static Media,
     pages: Vec<Bitmap>,
     opts: PrintOptions,
-) -> Result<bool> {
+) -> Result<bool, Failed> {
     let refs: Vec<&Bitmap> = pages.iter().collect();
     transport::print_system_queue(&queue, model, media, &refs, &opts)?;
     Ok(false)

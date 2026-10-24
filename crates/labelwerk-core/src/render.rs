@@ -119,6 +119,11 @@ impl Label {
     pub fn qr_data(&self) -> &str {
         if self.qr_content.trim().is_empty() { self.text.trim() } else { self.qr_content.trim() }
     }
+
+    /// Nothing would be printed: no text and no QR code.
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && !(self.qr && !self.qr_data().is_empty())
+    }
 }
 
 /// Where the printable area sits on the physical label, in design orientation and dots.

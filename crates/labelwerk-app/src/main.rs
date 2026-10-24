@@ -6,6 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod batch;
 mod i18n;
 mod printer;
 mod store;
@@ -24,7 +25,7 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Printer, RotateCw, Bold, Italic, RefreshCw, TextAlignStart, TextAlignCenter, TextAlignEnd, Tag, LoaderCircle,
-        Unplug, CircleAlert, CircleCheck, Heading, QrCode, Square, Info, Grid3x3
+        Unplug, CircleAlert, CircleCheck, Heading, QrCode, Square, Info, Grid3x3, Trash
     ]
 );
 
