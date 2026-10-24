@@ -1347,7 +1347,7 @@ impl LabelApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .pt(px(6.))
+                    .py(px(6.)) // room for the remove badges
                     .pr(px(6.))
                     .gap_2()
                     .items_center()
@@ -1377,13 +1377,14 @@ impl LabelApp {
     fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let blocked = self.blocker().is_some();
+        let in_batch = self.batch.labels.len() + usize::from(!self.label.is_empty());
         let label = match (self.printing, self.batch_mode) {
             (true, _) => tr!("Printing…", "Druckt …").to_string(),
-            (false, true) => {
-                let n = self.batch.labels.len() + usize::from(!self.label.is_empty());
-                if i18n::german() { format!("{} drucken", labels_count(n)) } else { format!("Print {}", labels_count(n)) }
+            (false, true) if in_batch > 0 => {
+                let n = labels_count(in_batch);
+                if i18n::german() { format!("{n} drucken") } else { format!("Print {n}") }
             }
-            (false, false) => tr!("Print", "Drucken").to_string(),
+            (false, _) => tr!("Print", "Drucken").to_string(),
         };
         let strip = if self.batch_mode { self.render_batch(cx).into_any_element() } else { self.render_history(cx).into_any_element() };
         h_flex()
